@@ -9,5 +9,7 @@ Methods scripts:
 
 Main scripts:
     - network_planning.py performs main algorithm on Air pollution dataset
+    - Dopt_placement.py performs sensor selection on Air pollution dataset using Joshi-Boyd sensor selection algorithm.
+	Used to compare with results of network_planning algorithm
     - network_design_SST.py performs main algorithm on SST dataset
 

@@ -8,6 +8,7 @@ Created on Mon Jul 17 17:21:04 2023
 import os
 import time
 import pandas as pd
+import geopy.distance
 from sklearn.model_selection import train_test_split
 import numpy as np
 import sys
@@ -44,6 +45,63 @@ def add_noise_signal(X:pd.DataFrame,seed:int=92,var:float=1.)->pd.DataFrame:
     X_noisy = X + noise
     #X_noisy[X_noisy<0] = 0.
     return X_noisy
+
+def define_rois_distance(Psi:np.ndarray,distances:pd.Series,distance_thresholds:list,n_regions:int)-> dict: 
+    """
+    Generates Regions of Interest (ROIs) based on distance from certain station
+
+    Args:
+        Psi (np.ndarray): low-rank basis
+        distances (pd.Series): distance of each location from origin station
+        distance_thresholds (list): thresholds for each ROI
+        n_regions (int): number of ROIs
+
+    Raises:
+        ValueError: Check if number of specified distance thresholds matches number of ROIs
+
+    Returns:
+        dict: Indices of each ROI. Key specifies the distance threshold
+    """
+    print(f'Determining indices that belong to each ROI. {n_regions} regions with thresholds: {distance_thresholds}')
+    if type(distance_thresholds) is not list:
+        distance_thresholds = [distance_thresholds]
+    if len(distance_thresholds) != n_regions:
+        raise ValueError(f'Number of distance thresholds: {distance_thresholds} mismatch specified number of regions: {n_regions}')
+    roi_idx = {el:[] for el in distance_thresholds}
+    #distance_thresholds = np.insert(distance_thresholds,0,0)
+    for i in range(len(distance_thresholds[:-1])):
+        print(f'Distance threshold between {distance_thresholds[i]} and {distance_thresholds[i+1]}')
+        stations = [j for j in distances[np.logical_and(distances>=distance_thresholds[i],distances<distance_thresholds[i+1])].index]
+        print(f'Stations ({len(stations)}): {stations}')
+        idx_stations = np.where(np.isin(distances.index,stations))[0]
+        roi_idx[distance_thresholds[i]] = idx_stations
+    stations = [j for j in distances[distances>=distance_thresholds[-1]].index]
+    print(f'Stations with a distance larger than {distance_thresholds[-1]} ({len(stations)}): {stations}')
+    idx_stations = np.where(np.isin(distances.index,stations))[0]
+    roi_idx[distance_thresholds[-1]] = idx_stations
+
+    return roi_idx
+
+def define_rois_variance(Psi:np.ndarray,coordinate_error_variance_fullymonitored:list,variance_thresholds:list,n_regions:int)->dict:
+    print(f'Determining indices that belong to each ROI. {n_regions} regions with thresholds: {variance_thresholds}')
+    if type(variance_thresholds) is not list:
+        variance_thresholds = [variance_thresholds]
+    if len(variance_thresholds) != n_regions:
+        raise ValueError(f'Number of variance thresholds: {variance_thresholds} mismatch specified number of regions: {n_regions}')
+    roi_idx = {el:[] for el in variance_thresholds}
+    for i in range(len(variance_thresholds[:-1])):
+        print(f'Variance threshold between {variance_thresholds[i]} and {variance_thresholds[i+1]}')
+        stations = [j for j in coordinate_error_variance_fullymonitored[np.logical_and(coordinate_error_variance_fullymonitored>=variance_thresholds[i],coordinate_error_variance_fullymonitored<variance_thresholds[i+1])]]
+        print(f'{len(stations)} stations')
+        idx_stations = np.where(np.isin(coordinate_error_variance_fullymonitored,stations))[0]
+        roi_idx[variance_thresholds[i]] = idx_stations
+    stations = [j for j in coordinate_error_variance_fullymonitored[coordinate_error_variance_fullymonitored>=variance_thresholds[-1]]]
+    print(f'{len(stations)} stations with a distance larger than {variance_thresholds[-1]}')
+    idx_stations = np.where(np.isin(coordinate_error_variance_fullymonitored,stations))[0]
+    roi_idx[variance_thresholds[-1]] = idx_stations
+    
+    return roi_idx
+        
 
 # signal reconstruction functions
 def signal_reconstruction_svd(U:np.ndarray,snapshots_matrix_train:np.ndarray,snapshots_matrix_val_centered:np.ndarray,X_val:pd.DataFrame,s_range:np.ndarray) -> pd.DataFrame:
@@ -125,21 +183,184 @@ def signal_reconstruction_regression(Psi:np.ndarray,locations_measured:np.ndarra
     
     return rmse, error_var.mean()
 
-def sensorplacement()->list:
-    pass
+def Joshi_Boyd_ROIs(roi_idx:dict,roi_threshold:list,n_sensors_per_roi:list,snapshots_matrix_train_centered:np.ndarray):
+    """
+    Sensor placement for network splitted over multiple Regions of Interest (ROIs). The sensor locations are determined by the Joshi-Boyd method.
+    The number of sensors at each ROI must be specified
+    Args:
+        roi_idx (dict): dictionary with indices of original network according to each ROI. The keys indicate the threshold at which the ROI is defined
+        roi_threshold (list): Thresholds used for defining the ROIs
+        n_sensors_per_roi (list): number of sensors to be deployed at each ROI
+        snapshots_matrix_train_centered (np.ndarray): dataset snapshots matrix with measurements at each location
+
+    Raises:
+        ValueError: _description_
+        ValueError: _description_
+        ValueError: _description_
+
+    Returns:
+        sensor_placement object
+    """    
+    
+    
+    algorithm = 'JB'
+    locations_monitored = []
+    locations_unmonitored = []
+    locations_monitored_roi = []
+    locations_unmonitored_roi = []       
+    
+    """ Iterate over ROIs. The solutions of previous ROIs are used onto the next union of ROIs"""
+    for i in range(len(roi_threshold)): # ROI iteration
+        indices = np.sort(np.concatenate([roi_idx[i] for i in roi_threshold[:i+1]]))
+        snapshots_matrix_roi = snapshots_matrix_train_centered[indices,:]
+        U_roi,sing_vals_roi,Vt_roi = np.linalg.svd(snapshots_matrix_roi,full_matrices=False)
+        energy_roi = np.cumsum(sing_vals_roi)/np.sum(sing_vals_roi)
+        signal_sparsity_roi = np.where(energy_roi>=0.9)[0][0]
+        Psi_roi = U_roi[:,:signal_sparsity_roi]
+        n_roi = Psi_roi.shape[0]
+        print(f'Current ROI has {n_roi} potential locations')
+        # carry monitored locations from previous ROI step
+        if len(locations_monitored)!=0:
+            locations_monitored_roi = np.where(np.isin(indices,locations_monitored))[0]
+        else:
+            locations_monitored_roi = []
+        
+        # initialize algorithm
+        n_sensors_roi = np.maximum(signal_sparsity_roi,np.sum(n_sensors_per_roi[:i+1]))
+        if n_sensors_per_roi[i] == -1:
+            if i==0:
+                n_sensors_per_roi[i] = n_sensors_roi
+            else:
+                n_sensors_per_roi[i] = n_sensors_roi - n_sensors_per_roi[i-1]
+        if n_sensors_roi > n_roi:
+            raise ValueError(f'Number of deployed sensors in ROI ({n_sensors_roi}) is larger than the number of potential locations in ROI ({n_roi}).')
+        elif n_sensors_roi < signal_sparsity_roi:
+            raise ValueError(f'Number of deployed sensors in ROI ({n_sensors_roi}) is lower than signal sparsity in ROI ({signal_sparsity_roi})')
+        print(f'Signal sparsity of sub-signal in ROI: {signal_sparsity_roi}\nNumber of locations in ROI: {n_sensors_roi}')
+        sensor_placement = sp.SensorPlacement(algorithm, n_roi, signal_sparsity_roi,
+                                                n_refst=n_sensors_roi,n_lcs=0,n_unmonitored=n_roi-n_sensors_roi)
+        sensor_placement.initialize_problem(Psi_roi,locations_monitored=locations_monitored_roi)
+        sensor_placement.solve()
+        sensor_placement.discretize_solution()
+        locations_monitored_roi = sensor_placement.locations[1]
+        # compute coordinate error variance on ROI
+        sensor_placement.C_matrix()
+        worst_coordinate_variance = np.diag(Psi_roi@np.linalg.inv(Psi_roi.T@sensor_placement.C[1].T@sensor_placement.C[1]@Psi_roi)@Psi_roi.T).max()
+        worst_coordinate_variance_fullymonitored = np.diag(Psi_roi@Psi_roi.T).max()
+        if worst_coordinate_variance > worst_coordinate_variance_fullymonitored:
+            raise ValueError()
+    return sensor_placement
+
+def Joshi_Boyd_VarianceThreshold(roi_idx:dict,roi_threshold:list,variance_threshold_ratio:list,snapshots_matrix_train_centered:np.ndarray,reverse_roi_order:bool,force_n:int=-1):
+    """
+    Iterative sensor placement over multiple Regions of Interest (ROIs). The
+    Args:
+        roi_idx (dict): Dictionary containing indices of locations asociated with each ROI. The keys correspond to thresholds for defining the ROI
+        roi_threshold (list): ROI threshold for defining each ROI
+        variance_threshold_ratio (list): percentage of worsening of coordinate error variance with respect to fully monitored network
+        snapshots_matrix_train_centered (np.ndarray): snapshots matrix of measurements
+        reverse_roi_order (bool): reverse ROI order
+        force_n (int): stop algorithm when number of sensors reaches specified value.
+
+    Raises:
+        ValueError: _description_
+        ValueError: _description_
+
+    Returns:
+        _type_: _description_
+    """    
+    algorithm = 'JB'
+    locations_monitored = []
+    locations_unmonitored = []
+    locations_monitored_roi = []
+    locations_unmonitored_roi = []       
+    
+    """ Iterate over ROIs. The solutions of previous ROIs are used onto the next union of ROIs"""
+    if reverse_roi_order:
+        iterator = range(len(roi_threshold))[::-1]
+    else:
+        iterator = range(len(roi_threshold))
+    indices_rois = [i for i in roi_idx.values()]
+    for i in iterator: # ROI iteration
+        indices = np.sort(np.concatenate([roi_idx[j] for j in roi_threshold[:i+1]]))
+        snapshots_matrix_roi = snapshots_matrix_train_centered[indices,:]
+        U_roi,sing_vals_roi,Vt_roi = np.linalg.svd(snapshots_matrix_roi,full_matrices=False)
+        energy_roi = np.cumsum(sing_vals_roi)/np.sum(sing_vals_roi)
+        signal_sparsity_roi = np.where(energy_roi>=0.9)[0][0]
+        Psi_roi = U_roi[:,:signal_sparsity_roi]
+        n_roi = Psi_roi.shape[0]
+        print(f'Current ROI has {n_roi} potential locations')
+        # carry monitored locations from previous ROI step
+        if len(locations_monitored)!=0:
+            locations_monitored_roi = np.where(np.isin(indices,locations_monitored))[0]
+        else:
+            locations_monitored_roi = []
+        
+        for n_sensors_roi in np.arange(signal_sparsity_roi,n_roi+1,1):# number of sensors per ROI iteration
+            
+            if n_sensors_roi > n_roi:
+                raise ValueError(f'Number of deployed sensors in ROI ({n_sensors_roi}) is larger than the number of potential locations in ROI ({n_roi}).')
+            elif n_sensors_roi < signal_sparsity_roi:
+                raise ValueError(f'Number of deployed sensors in ROI ({n_sensors_roi}) is lower than signal sparsity in ROI ({signal_sparsity_roi})')
+            print(f'Signal sparsity of sub-signal in ROI: {signal_sparsity_roi}\nNumber of locations in ROI: {n_sensors_roi}')
+            # initialize algorithm
+            sensor_placement = sp.SensorPlacement(algorithm, n_roi, signal_sparsity_roi,
+                                                    n_refst=n_sensors_roi,n_lcs=0,n_unmonitored=n_roi-n_sensors_roi)
+            sensor_placement.initialize_problem(Psi_roi,locations_monitored=locations_monitored_roi)
+            sensor_placement.solve()
+            sensor_placement.discretize_solution()
+            locations = sensor_placement.locations[1]
+            sensor_placement.C_matrix()
+            # compute coordinate error variance restricted to different ROIs that compose the union of ROIs
+            idx_rois = [np.where(np.isin(indices,indices_rois[k]))[0] for k in range(i+1)]
+            # idx_monitored = [i for i in indices[idx] if i in indices[locations]]
+            # idx_monitored = np.where(np.isin(indices,idx_monitored))[0]
+            covariance_matrix_fullymonitored_roi = Psi_roi@np.linalg.inv(Psi_roi.T@Psi_roi)@Psi_roi.T
+            covariance_matrix_roi = Psi_roi@np.linalg.inv(Psi_roi.T@sensor_placement.C[1].T@sensor_placement.C[1]@Psi_roi)@Psi_roi.T
+            worst_coordinate_variance_fullymonitored_roi = [np.diag(covariance_matrix_fullymonitored_roi)[idx].max() for idx in idx_rois]
+            worst_coordinate_variance_roi = [np.diag(covariance_matrix_roi)[idx].max() for idx in idx_rois]
+            n_rois_fullfilled = 0
+            if n_sensors_roi != force_n:
+                for k in range(i+1):
+                    if worst_coordinate_variance_roi[k] < variance_threshold_ratio[k]*worst_coordinate_variance_fullymonitored_roi[k]:
+                            n_rois_fullfilled +=1
+                if n_rois_fullfilled == i+1:
+                    locations_monitored_roi = sensor_placement.locations[1]
+                    locations_monitored = indices[locations_monitored_roi]
+                    break
+            else:
+                locations_monitored_roi = sensor_placement.locations[1]
+                locations_monitored = indices[locations_monitored_roi]
+                break
+                
+    return sensor_placement
+
+
 # dataset
 class Dataset():
-    def __init__(self,pollutant:str='O3',start_date:str='2011-01-01',end_date:str='2022-12-31',files_path:str=''):
+    def __init__(self,pollutant:str='O3',N:int=44,start_date:str='2011-01-01',end_date:str='2022-12-31',files_path:str='',synthetic_dataset:bool=False):
         self.pollutant = pollutant
+        self.N = N
         self.start_date = start_date
         self.end_date = end_date
         self.files_path = files_path
+        self.synthetic_dataset = synthetic_dataset
     
-    def load_dataset(self):        
-        fname = f'{self.files_path}{self.pollutant}_catalonia_clean_{self.start_date}_{self.end_date}.csv'
+    def load_dataset(self):
+        if self.synthetic_dataset:
+            fname = f'{self.files_path}SyntheticData_{self.start_date}_{self.end_date}.csv'
+        else:
+            fname = f'{self.files_path}{self.pollutant}_catalonia_clean_N{self.N}_{self.start_date}_{self.end_date}.csv'
+            self.coordinates = pd.read_csv(f'{self.files_path}coordinates.csv',index_col=0)
+            self.coordinates_distances = pd.DataFrame([],index=self.coordinates.index,columns=self.coordinates.index)
+            for i in range(self.coordinates.shape[0]):
+                for j in range(self.coordinates.shape[0]):
+                    self.coordinates_distances.iloc[i,j] = geopy.distance.geodesic(self.coordinates.iloc[i,:],self.coordinates.iloc[j,:]).km
+
         print(f'Loading dataset from {fname}')
         self.ds = pd.read_csv(fname,sep=',',index_col=0)
         self.ds.index = pd.to_datetime(self.ds.index)
+        
 
     def check_dataset(self):
         print(f'Checking missing values in dataset')
@@ -623,7 +844,7 @@ class Figures():
             fig.savefig(fname,dpi=300,format='png')
         return fig
     
-    
+
 
 if __name__ == '__main__':
     """ load dataset to use """
@@ -634,10 +855,16 @@ if __name__ == '__main__':
     pollutant = 'O3'
     start_date = '2011-01-01'
     end_date = '2022-12-31'
-
-    dataset = Dataset(pollutant,start_date,end_date,files_path)
+    N=48
+    dataset = Dataset(pollutant,N,start_date,end_date,files_path)
     dataset.load_dataset()
     dataset.check_dataset()
+
+    """ sort stations based on distance"""
+    dataset.distances = dataset.coordinates_distances.loc['Ciutadella']
+    dataset.distances.sort_values(ascending=True,inplace=True)
+    dataset.ds = dataset.ds.loc[:,[f'O3_{i}' for i in dataset.distances.index if f'O3_{i}' in dataset.ds.columns]]
+    print(f'Order of dataset locations: {dataset.ds.columns}')
 
     """ snapshots matrix and low-rank decomposition """
     # train/val/test split
@@ -650,9 +877,9 @@ if __name__ == '__main__':
     
     """
         D-optimality sensor placement criteria:
-            - number of sensors specified a priori (from network design)
+            - number of sensors specified a priori. Number of sensors is obtained from network design algorithm for comparison
     """
-    deploy_sensors = True
+    deploy_sensors = False
     if deploy_sensors:
         # low-rank decomposition
         snapshots_matrix_train = X_train.to_numpy().T
@@ -664,15 +891,17 @@ if __name__ == '__main__':
         U,sing_vals,Vt = np.linalg.svd(snapshots_matrix_train_centered,full_matrices=False)
         print(f'Training snapshots matrix has dimensions {snapshots_matrix_train_centered.shape}.\nLeft singular vectors matrix has dimensions {U.shape}\nRight singular vectors matrix has dimensions [{Vt.shape}]\nNumber of singular values: {sing_vals.shape}')
         # specify signal sparsity
-        signal_sparsity = 28
+        signal_sparsity = 36#[30,36] # 30 for RMSE < 0.5 // 36 for energy>0.9 
         Psi = U[:,:signal_sparsity]
         n = Psi.shape[0]
-        n_sensors = 31
+        n_sensors = 41
         # initialize algorithm
         algorithm = 'JB'
+        locations_monitored = []
+        locations_unmonitored = []
         sensor_placement = sp.SensorPlacement(algorithm, n, signal_sparsity,
                                               n_refst=n_sensors,n_lcs=0,n_unmonitored=n-n_sensors)
-        sensor_placement.initialize_problem(Psi)
+        sensor_placement.initialize_problem(Psi,locations_monitored=locations_monitored,locations_unmonitored=locations_unmonitored)
         sensor_placement.solve()
         sensor_placement.discretize_solution()
         locations = [sensor_placement.locations[1],[i for i in np.arange(n) if i not in sensor_placement.locations[1]]]
@@ -690,8 +919,66 @@ if __name__ == '__main__':
         print(f'File saved in {fname}')
         sys.exit()
 
+    sensor_placement_rois = True
+    if sensor_placement_rois:
+        # low-rank decomposition
+        snapshots_matrix_train = X_train.to_numpy().T
+        snapshots_matrix_val = X_val.to_numpy().T
+        snapshots_matrix_test = X_test.to_numpy().T
+        snapshots_matrix_train_centered = snapshots_matrix_train - snapshots_matrix_train.mean(axis=1)[:,None]
+        snapshots_matrix_val_centered = snapshots_matrix_val - snapshots_matrix_train.mean(axis=1)[:,None]
+        snapshots_matrix_test_centered = snapshots_matrix_test - snapshots_matrix_train.mean(axis=1)[:,None]
+        U,sing_vals,Vt = np.linalg.svd(snapshots_matrix_train_centered,full_matrices=False)
+        print(f'Training snapshots matrix has dimensions {snapshots_matrix_train_centered.shape}.\nLeft singular vectors matrix has dimensions {U.shape}\nRight singular vectors matrix has dimensions [{Vt.shape}]\nNumber of singular values: {sing_vals.shape}')
+        # specify signal sparsity
+        signal_sparsity = 36#[30,36] # 30 for RMSE < 0.5 // 36 for energy>0.9 
+        Psi = U[:,:signal_sparsity]
+        n = Psi.shape[0]
+        
+        # define ROIs
+        distance_based_ROIs = False
+        if distance_based_ROIs:
+            print('Distance based ROIs')
+            distance_thresholds = [0,10] #km
+            roi_threshold =  distance_thresholds
+            n_regions = len(distance_thresholds)
+            roi_idx = define_rois_distance(Psi,dataset.distances,distance_thresholds,n_regions)
+        variance_based_ROIs = True
+        if variance_based_ROIs:
+            print('Variance based ROIs')
+            coordinate_error_variance_fullymonitored = np.diag(Psi@np.linalg.inv(Psi.T@Psi)@Psi.T)
+            variance_thresholds = [0,0.75]
+            roi_threshold = variance_thresholds
+            n_regions = len(variance_thresholds)
+            roi_idx = define_rois_variance(Psi,coordinate_error_variance_fullymonitored,variance_thresholds,n_regions)
+        variance_threshold_ratio = [2.0,2.5]
+        if len(variance_threshold_ratio) != n_regions:
+            raise ValueError(f'Number of user-defined thresholds ({len(variance_threshold_ratio)}) mismatch number of ROIs ({n_regions})')
+
+        # n_sensors = 40
+        # n_sensors_per_roi = [5,35]# set to -1 for using signal sparsity
+        #sensor_placement = Joshi_Boyd_ROIs(roi_idx,roi_threshold,n_sensors_per_roi,snapshots_matrix_train_centered)
+        sensor_placement = Joshi_Boyd_VarianceThreshold(roi_idx,roi_threshold,
+                                                        variance_threshold_ratio,snapshots_matrix_train_centered,
+                                                        reverse_roi_order=False,force_n=40)
+        locations = [sensor_placement.locations[1],[i for i in np.arange(n) if i not in sensor_placement.locations[1]]]
+        sensor_placement.C_matrix()
+        # deploy sensors and compute variance
+        worst_coordinate_variance = np.diag(Psi@np.linalg.inv(Psi.T@sensor_placement.C[1].T@sensor_placement.C[1]@Psi)@Psi.T).max()
+        locations_monitored = sensor_placement.locations[1]
+        n_locations_monitored = len(locations[0])
+        n_locations_unmonitored = len(locations[1])
+        print(f'Network planning results:\n- Total number of potential locations: {n}\n- basis sparsity: {signal_sparsity}\n- Deployed network max variance: {worst_coordinate_variance:.2f}\n- Number of monitored locations: {n_locations_monitored}\n- Number of unmonitored locations: {n_locations_unmonitored}\n')
+        # save results
+        fname = f'{results_path}SensorsLocations_Boyd_N{n}_S{signal_sparsity}_VarThreshold{variance_threshold_ratio}_nSensors{n_locations_monitored}.pkl'
+        with open(fname,'wb') as f:
+            pickle.dump(locations[0],f,protocol=pickle.HIGHEST_PROTOCOL)
+        print(f'File saved in {fname}')
+        sys.exit()
+
+
     """ Reconstruct signal using measurements at certain locations and compare with actual values """
-    reconstruct_signal = True
+    reconstruct_signal = False
     if reconstruct_signal:
         # low-rank decomposition
         snapshots_matrix_train = X_train.to_numpy().T
@@ -703,15 +990,15 @@ if __name__ == '__main__':
         U,sing_vals,Vt = np.linalg.svd(snapshots_matrix_train_centered,full_matrices=False)
         print(f'Training snapshots matrix has dimensions {snapshots_matrix_train_centered.shape}.\nLeft singular vectors matrix has dimensions {U.shape}\nRight singular vectors matrix has dimensions [{Vt.shape}]\nNumber of singular values: {sing_vals.shape}')
         # specify signal sparsity and network parameters
-        signal_sparsity = 28
+        signal_sparsity = 30
         Psi = U[:,:signal_sparsity]
         n = Psi.shape[0]
         variance_threshold_ratio = 1.5
-        n_locations_monitored = 30
+        n_locations_monitored = 33
         fully_monitored_network_max_variance = np.diag(Psi@np.linalg.inv(Psi.T@Psi)@Psi.T).max()
         deployed_network_variance_threshold = variance_threshold_ratio*fully_monitored_network_max_variance
         # load monitored locations indices
-        fname = f'{results_path}Dopt/SensorsLocations_N{n}_S{signal_sparsity}_VarThreshold{variance_threshold_ratio:.1f}_nSensors{n_locations_monitored}.pkl'
+        fname = f'{results_path}Dopt/homogeneous/SensorsLocations_N{n}_S{signal_sparsity}_nSensors{n_locations_monitored}.pkl'
         with open(fname,'rb') as f:
             locations_monitored = np.sort(pickle.load(f))
         locations_unmonitored = [i for i in np.arange(n) if i not in locations_monitored]

@@ -7,10 +7,11 @@ Created on Mon Jul 17 17:21:04 2023
 """
 import numpy as np
 import cvxpy as cp
+from cvxopt import matrix, solvers, spmatrix, sparse, spdiag
 from scipy import linalg
 import pickle
 import time
-import warnings
+
 import sys
 
 
@@ -49,7 +50,7 @@ class SensorPlacement:
 
     """ Sensor placement algorithms """
 
-    def JB_placement(self,Psi):
+    def JB_placement(self,Psi,locations_monitored:list,locations_unmonitored:list):
             """
             Simple D-optimal sensor placement for single class of sensors
 
@@ -57,8 +58,10 @@ class SensorPlacement:
             ----------
             Psi : np array
                 Reduced basis of shape (number of locations, number of vectors)
-            alpha : float
-                regularization parameter for rank minimization constraint
+            locations_monitored: list
+                indices of locations that have a sensor
+            locations_unmonitored: lsit
+                indices of forbidden locations
 
             Returns
             -------
@@ -67,10 +70,16 @@ class SensorPlacement:
             """
             h = cp.Variable(shape=self.n,value=np.zeros(self.n))
             objective = -1*cp.log_det(cp.sum([h[i]*Psi[i,:][None,:].T@Psi[i,:][None,:] for i in range(self.n)]))
-            constraints = [cp.sum(h) == self.n_refst + self.n_lcs,
+            constraints = [ cp.sum(h) == self.n_refst + self.n_lcs,
                         h >=0,
                         h <= 1,
                         ]
+            if len(locations_monitored) != 0:
+                print(f'Adding constraint on {len(locations_monitored)} monitored locations')
+                constraints += [h[locations_monitored] == 1]
+            if len(locations_unmonitored) !=0:
+                print(f'Adding constraint on {len(locations_unmonitored)} unmonitored locations')
+                constraints += [h[locations_unmonitored]==0]
             problem = cp.Problem(cp.Minimize(objective),constraints)
 
 
@@ -176,7 +185,17 @@ class SensorPlacement:
         self.h_refst = h_refst
         self.problem = problem
 
-    def networkPlanning_singleclass(self,Psi,rho):
+    def networkPlanning_singleclass(self,Psi:np.ndarray,rho:float):
+        """
+        min |h|_1
+        s.t. -  0<=h<=1
+             -  sum(h) >=s
+             -  M_i >= 0(PSD), i=1,...,n
+
+        Args:
+            Psi (np.ndarray): Low-rank basis
+            rho (float): accuracy threshold
+        """
         h = cp.Variable(shape = self.n,value=np.zeros(self.n))
         objective = cp.norm(h,1)
         constraints = [h >=0,
@@ -199,8 +218,27 @@ class SensorPlacement:
         self.h = h
         self.problem = problem
 
-    def networkPlanning_singleclass_iterative(self,Psi,rho,w,locations_monitored=[],locations_unmonitored=[]):
-        In = np.identity(self.n)
+    def networkPlanning_singleclass_iterative(self,Psi:np.ndarray,rho:list,w:np.array,locations_monitored:list=[],locations_unmonitored:list=[]):
+        """
+        Network design algorithm using Candes IRL1 objective function and Rusu method to ensure binary solution.
+        The lists must be updated iteratively when calling this method from the solution h.
+
+        min     w.T @ h
+        s.t.    - 0<=h<=1
+                - h[S] == 1
+                - h[Sc] == 0
+                - sum(h)>=s
+                - M_i >>= (PSD),i=1...n 
+
+        Args:
+            Psi (np.ndarray): Low-rank basis
+            rho (list):accuracy threshold
+            w (np.array): weights vector
+            locations_monitored (list, optional): indices of monitored locations from previous steps. Defaults to [].
+            locations_unmonitored (list, optional): indices of unmonitored locations from previous steps. Defaults to [].
+        """
+        
+        #In = np.identity(self.n,dtype=np.float32)
         if len(locations_monitored)!=0:
             h_init = np.zeros(self.n)
             h_init[locations_monitored] = 1
@@ -218,9 +256,16 @@ class SensorPlacement:
             constraints += [h[locations_unmonitored]==0]
 
         for i in range(self.n):
-            e_i = In[:,i]
+            #e_i = In[:,i]
+            e_i = np.zeros(self.n,dtype=np.float32)
+            e_i[i] = 1
             r1 = cp.hstack([Psi.T@cp.diag(h)@Psi,Psi.T@e_i[:,None]])
-            r2 = cp.hstack([e_i[:,None].T@Psi,np.array([rho])[:,None]])
+            if type(rho) in [float,np.float32,np.float64]:
+                r2 = cp.hstack([e_i[:,None].T@Psi,np.array([rho])[:,None]])
+            elif len(rho) == 1:
+                r2 = cp.hstack([e_i[:,None].T@Psi,np.array([rho[0]])[:,None]])
+            else:
+                r2 = cp.hstack([e_i[:,None].T@Psi,np.array([rho[i]])[:,None]])
             M_i = cp.vstack([r1,r2])
             constraints += [M_i >> 0]
         problem = cp.Problem(cp.Minimize(objective),constraints)
@@ -230,7 +275,182 @@ class SensorPlacement:
         self.h = h
         self.problem = problem
         
+    def networkPlanning_singleclass_iterative_LMI(self,Psi:np.ndarray,rho:float,w:np.array,locations_monitored:list=[],locations_unmonitored:list=[]):
+        """
+        Network design algorithm using Candes IRL1 objective function and Rusu method to ensure binary solution.
+        The lists must be updated iteratively when calling this method from the solution h.
         
+        Alternate method.
+        Differs from non-LMI version in that the M_i >> 0, i=1,...,n is replaced with the LMI from Rn -> cone Sn+
+        
+        Args:
+            Psi (np.ndarray): Low-rank basis
+            rho (float):accuracy threshold
+            w (np.array): weights vector
+        """
+        self.rho = cp.Parameter(value=rho,name='variance_threshold')
+        self.Psi = cp.Parameter(shape=Psi.shape,value=Psi,name='Basis')
+        self.w = cp.Parameter(shape=w.shape,value=w,name='weights')
+        self.h = cp.Variable(shape = self.n,value=np.zeros(self.n))
+        
+        objective = self.w.T@self.h
+        # value constraints
+        constraints = [self.h >=0,
+                    self.h <= 1,
+                    cp.sum(self.h) >= self.s
+                    ]
+        
+        if len(locations_monitored) !=0:
+            constraints += [self.h[locations_monitored]==1]
+        if len(locations_unmonitored) != 0:
+            constraints += [self.h[locations_unmonitored]==0]
+
+        
+        # LMI constraints
+        sum = cp.sum([self.h[i]*self.rho*self.Psi[i,:][None,:].T@self.Psi[i,:][None,:] for i in range(self.n)])
+        for i in range(self.n):
+            M_i = sum - self.Psi[i,:][None,:].T@self.Psi[i,:][None,:]
+            constraints += [M_i >> 0]
+
+        self.problem = cp.Problem(cp.Minimize(objective),constraints)
+
+        if not self.problem.is_dcp():
+            raise TypeError('Problem not dcp\nCheck constraints and objective function')
+    
+    def IRL1_networkDesign(self,Psi:np.ndarray,rho:float,w:np.array,locations_monitored:list=[],locations_unmonitored:list=[],epsilon:float=1e-2,primal_start={'x':[],'sl':[],'ss':[]}):
+        """
+        Network design algorithm using Candes IRL1 objective function and Rusu method to ensure binary solution.
+        The lists must be updated iteratively when calling this method from the solution h.
+
+        Equality constraints are unsupported by cvxopt solver. Using ineq constraint of epsilon tolerance
+        min     w.T @ h
+        s.t.    - 0<=h<=1
+                - sum(h)>=s
+                - h[S] == 1
+                - h[Sc] == 0
+                - M_i >>= (PSD),i=1...n 
+
+        Args:
+            Psi (np.ndarray): Low-rank basis
+            rho (float):accuracy threshold
+            w (np.array): weights vector
+            locations_monitored (list, optional): indices of monitored locations from previous steps. Defaults to [].
+            locations_unmonitored (list, optional): indices of unmonitored locations from previous steps. Defaults to [].
+        """
+        
+        c = matrix(w)
+        # equality constraint
+        In = spmatrix(1.,range(self.n),range(self.n))
+        C_monitored = In[locations_monitored,:]
+        C_unmonitored = In[locations_unmonitored,:]
+        #C_forbidden = In[locations_forbidden,:]
+        #matrix_eq = sparse([C_monitored,C_unmonitored])
+        #vector_eq = matrix([matrix(np.tile(1,len(locations_monitored))),matrix(np.tile(0,len(locations_unmonitored)))],tc='d')
+        """ inequality constraints """
+        # order of constraints: h>=0 | h<=1 | sum(h)>= s | h[S]>= 1-eps | h[Sc] <= eps | h[Sf] <=eps
+        matrix_ineq = sparse([spdiag(matrix(-1,(self.n,1))),
+                              spdiag(matrix(1,(self.n,1))),
+                              matrix(-1,(1,self.n)),
+                              sparse(-1*C_monitored),
+                              sparse(C_unmonitored)])
+                              #sparse(C_forbidden)])
+        
+        vector_ineq = matrix([matrix(np.tile(0,self.n)),
+                              matrix(np.tile(1,self.n)),
+                              -self.s,
+                              matrix(np.tile(-(1-epsilon),len(locations_monitored))),
+                              matrix(np.tile(epsilon,len(locations_unmonitored)))],tc='d')
+                              #matrix(np.tile(epsilon,len(locations_forbidden))) ],tc='d')
+        # LMI constraint
+        #matrix_sdp = [sparse([np.reshape(-rho*Psi[i,:][None,:].T@Psi[i,:][None,:],newshape=self.s*self.s,order='F').tolist() for i in range(self.n)])]*self.n
+        #vector_sdp = [matrix(-1*Psi[i,:][None,:].T@Psi[i,:][None,:]) for i in range(self.n)]
+        matrix_sdp = [sparse([np.reshape(np.tril(-rho*Psi[i,:][None,:].T@Psi[i,:][None,:]),newshape=self.s*self.s,order='F').tolist() for i in range(self.n)])]*self.n
+        print(f'Basis type: {type(Psi)}. Basis dtype: {Psi.dtype}')
+        vector_sdp = [matrix(np.tril(-1*Psi[i,:][None,:].T@Psi[i,:][None,:]).astype(float)) for i in range(self.n)]
+        # solver and solution
+        print('Calling SDP solver')
+        try:
+            self.problem = solvers.sdp(c,Gl=matrix_ineq,hl=vector_ineq,Gs=matrix_sdp,hs=vector_sdp,verbose=True,solver='dsdp',primalstart=primal_start)
+        except:    
+            self.problem = solvers.sdp(c,Gl=matrix_ineq,hl=vector_ineq,Gs=matrix_sdp,hs=vector_sdp,verbose=True,solver='dsdp')
+        self.h = np.array(self.problem['x'])
+
+
+    def IRNet_ROIs(self,Psi:np.ndarray,rho:float,w:np.array,locations_monitored:list=[],locations_unmonitored:list=[],epsilon:float=1e-2,primal_start={'x':[],'sl':[],'ss':[]},include_sparsity_constraint:str=True):
+        """
+        Network design algorithm using Candes IRL1 objective function and Rusu method to ensure binary solution.
+        Method for constrinaing the maximum error variance over a subset ROI
+        The lists must be updated iteratively when calling this method from the solution h.
+        Equality constraints are unsupported by cvxopt solver. Using ineq constraint of epsilon tolerance
+
+        min     w.T @ h
+        s.t.    - 0<=h<=1
+                - sum(h)>=s
+                - h[S] == 1
+                - h[Sc] == 0
+                - M_i >>= (PSD),i=1...n 
+
+        Args:
+            Psi (np.ndarray): Low-rank basis. The basis is restrained to ROI indices
+            rho (float):accuracy threshold
+            w (np.array): weights vector
+            locations_monitored (list, optional): indices of monitored locations from previous steps. Defaults to [].
+            locations_unmonitored (list, optional): indices of unmonitored locations from previous steps. Defaults to [].
+        """
+        
+        c = matrix(w)
+        # equality constraint
+        In = spmatrix(1.,range(self.n),range(self.n))
+        C_monitored = In[locations_monitored,:]
+        C_unmonitored = In[locations_unmonitored,:]
+        #C_forbidden = In[locations_forbidden,:]
+        #matrix_eq = sparse([C_monitored,C_unmonitored])
+        #vector_eq = matrix([matrix(np.tile(1,len(locations_monitored))),matrix(np.tile(0,len(locations_unmonitored)))],tc='d')
+        """ inequality constraints """
+        # order of constraints: h>=0 | h<=1 | sum(h)>= s | h[S]>= 1-eps | h[Sc] <= eps | h[Sf] <=eps
+        if include_sparsity_constraint:
+            matrix_ineq = sparse([spdiag(matrix(-1,(self.n,1))),
+                                spdiag(matrix(1,(self.n,1))),
+                                matrix(-1,(1,self.n)),
+                                sparse(-1*C_monitored),
+                                sparse(C_unmonitored)])
+                                #sparse(C_forbidden)])
+            
+            vector_ineq = matrix([matrix(np.tile(0,self.n)),
+                                matrix(np.tile(1,self.n)),
+                                -self.s,
+                                matrix(np.tile(-(1-epsilon),len(locations_monitored))),
+                                matrix(np.tile(epsilon,len(locations_unmonitored)))],tc='d')                              
+                                #matrix(np.tile(epsilon,len(locations_forbidden))) ],tc='d')
+        else:# order of constraints: h>=0 | h<=1 | h[S]>= 1-eps | h[Sc] <= eps | h[Sf] <=eps
+            # constraint |sum(h)>= s| NOT included
+            matrix_ineq = sparse([spdiag(matrix(-1,(self.n,1))),
+                                spdiag(matrix(1,(self.n,1))),
+                                sparse(-1*C_monitored),
+                                sparse(C_unmonitored)])
+                                
+            vector_ineq = matrix([matrix(np.tile(0,self.n)),
+                                matrix(np.tile(1,self.n)),
+                                matrix(np.tile(-(1-epsilon),len(locations_monitored))),
+                                matrix(np.tile(epsilon,len(locations_unmonitored)))],tc='d')
+            
+            
+        """ LMI constraint """
+        #matrix_sdp = [sparse([np.reshape(-rho*Psi[i,:][None,:].T@Psi[i,:][None,:],newshape=self.s*self.s,order='F').tolist() for i in range(self.n)])]*self.n
+        #vector_sdp = [matrix(np.tril(-1*Psi[i,:][None,:].T@Psi[i,:][None,:]).astype(float)) for i in range(self.n)]
+        matrix_sdp = [sparse([np.reshape(np.tril(-rho*Psi[i,:][None,:].T@Psi[i,:][None,:]),newshape=self.s*self.s,order='F').tolist() for i in range(self.n)])]
+        print(f'Basis type: {type(Psi)}. Basis dtype: {Psi.dtype}')
+        vector_sdp = [matrix(np.tril(-1*Psi.T@Psi).astype(float))]
+        
+        # solver and solution
+        print('Calling SDP solver')
+        try:
+            self.problem = solvers.sdp(c,Gl=matrix_ineq,hl=vector_ineq,Gs=matrix_sdp,hs=vector_sdp,verbose=True,solver='dsdp',primalstart=primal_start)
+        except:    
+            self.problem = solvers.sdp(c,Gl=matrix_ineq,hl=vector_ineq,Gs=matrix_sdp,hs=vector_sdp,verbose=True,solver='dsdp')
+        self.h = np.array(self.problem['x'])
+
+
     # other algorithms
     def WCS_placement(self,Psi):
         """
@@ -364,7 +584,7 @@ class SensorPlacement:
         else:
             print(f'No initialization errors found.\nNetwork summary:\n- network size: {self.n}\n- signal sparsity: {self.s}\n- number of reference stations: {self.n_refst}\n- number of LCSs: {self.n_lcs}\n- number of unmonitored locations: {self.n_unmonitored}\n- reference staions variance: {self.var_refst}\n- LCSs variance: {self.var_lcs}')
 
-    def initialize_problem(self,Psi:np.ndarray,alpha:float=0.,rho:float=100.,w = cp.Variable(),locations_monitored:list = [],locations_unmonitored:list = []):
+    def initialize_problem(self,Psi:np.ndarray,alpha:float=0.,rho:float=100.,w = cp.Variable(),locations_monitored:list = [],locations_unmonitored:list = [],epsilon:float=1e-2,primal_start:dict={},include_sparsity_constraint=False):
         """
         Initializes sensor placement problem
 
@@ -373,10 +593,10 @@ class SensorPlacement:
             alpha (float, optional): rankMax regularization hyperparameter. Defaults to 0.
             rho (float, optional): network planning sensor placement accuracy threshold
         """
-
-        self.check_consistency()
+        if self.algorithm not in ['IRNet_ROI','IRL1ND']:
+            self.check_consistency()
         
-        algorithms = ['rankMax','MCJB','JB','NetworkPlanning','NetworkPlanning_iterative']
+        algorithms = ['rankMax','MCJB','JB','NetworkPlanning','NetworkPlanning_iterative','NetworkPlanning_iterative_LMI','IRL1ND','IRL1ND_candes','IRNet_ROI']
 
         if self.algorithm not in algorithms:
             print(f'Sensor placement algorithm {self.algorithm} not implemented yet')
@@ -397,7 +617,7 @@ class SensorPlacement:
         
         elif self.algorithm == 'JB':
             print(f'Setting {self.algorithm} sensor placement algorithm')
-            self.JB_placement(Psi)
+            self.JB_placement(Psi,locations_monitored,locations_unmonitored)
 
         elif self.algorithm == 'NetworkPlanning':
             print(f'Setting {self.algorithm} sensor placement algorithm')
@@ -406,6 +626,15 @@ class SensorPlacement:
         elif self.algorithm == 'NetworkPlanning_iterative':
             print(f'Setting {self.algorithm} sensor placement algorithm')
             self.networkPlanning_singleclass_iterative(Psi,rho,w,locations_monitored,locations_unmonitored)
+        elif self.algorithm == 'NetworkPlanning_iterative_LMI':
+            print(f'Setting {self.algorithm} sensor placement algorithm')
+            self.networkPlanning_singleclass_iterative_LMI(Psi,rho,w,locations_monitored,locations_unmonitored)
+        elif self.algorithm == 'IRL1ND' or self.algorithm == 'IRL1ND_candes':
+            print(f'{self.algorithm} sensor placement algorithm')
+            self.IRL1_networkDesign(Psi,rho,w,locations_monitored,locations_unmonitored,epsilon,primal_start)
+        elif self.algorithm == 'IRNet_ROI':
+            print(f'IRNet algorithm for large-scale deployments using ROIs')
+            self.IRNet_ROIs(Psi,rho,w,locations_monitored,locations_unmonitored,epsilon,primal_start,include_sparsity_constraint)
 
         # others
         elif self.algorithm == 'WCS':
@@ -884,32 +1113,121 @@ if __name__ == '__main__':
         - signal sparsity
         - variance of sensors
     """
-    N = 44
-    SIGNAL_SPARSITY = 20
-    N_LCS, N_REFST = 0,44
+    N = 50#691150
+    #SIGNAL_SPARSITY = 25#280
+    N_LCS, N_REFST = 0,N
     N_UNMONITORED = N - N_REFST - N_LCS
     VAR_LCS, VAR_REFST = 1,1e-2
 
     """ Create test measurement matrix, snapshots matrix and low-rank basis """
     rng = np.random.default_rng(seed=40)
-    NUM_SAMPLES = int(1e4)
-    X = rng.random((NUM_SAMPLES,N))
+    NUM_SAMPLES = int(5e2)
+    X = rng.normal(loc=0.0,scale=1.0,size=(NUM_SAMPLES,N))
     snapshots_matrix = X.T
     snapshots_matrix_centered = snapshots_matrix - snapshots_matrix.mean(axis=1)[:,None]
     U,S,Vt = np.linalg.svd(snapshots_matrix,full_matrices=False)
-    Psi = U[:,:SIGNAL_SPARSITY]
-
-    fully_monitored_network_worst_accuracy = np.diag(Psi@np.linalg.inv(Psi.T@Psi)@Psi.T).max()
-    deployed_network_accuracy_threshold = 1.5*fully_monitored_network_worst_accuracy
+    cumulative_energy = np.cumsum(S)/np.sum(S)
+    energy_threshold = 0.9
+    sparsity_energy = np.where(cumulative_energy>=energy_threshold)[0][0]
+    print(f'Cumulative energy surpasses the threshold of {energy_threshold:.2f} at index: {sparsity_energy}')
+    sparsity_energy+=1
+    Psi = U[:,:sparsity_energy]
+    fully_monitored_network_max_variance = np.diag(Psi@np.linalg.inv(Psi.T@Psi)@Psi.T).max()
+    variance_threshold_ratio = 1.5
+    deployed_network_accuracy_threshold = variance_threshold_ratio*fully_monitored_network_max_variance
+    print(f'Network parameters:\n - network size: {N}\n - signal sparsity: {sparsity_energy}\n - snapshots matrix shape: {snapshots_matrix.shape}\n - Psi basis shape: {Psi.shape}')
     
     """ Solve network planning problem """
-    algorithm = 'NetworkPlanning_iterative'
-    sensor_placement = SensorPlacement(algorithm, N, SIGNAL_SPARSITY,N_REFST,N_LCS,N_UNMONITORED)
+    algorithm = 'IRL1ND'#['NetworkPlanning_iterative','IRL1ND','IRNet_ROI']
+    sensor_placement = SensorPlacement(algorithm, N, sparsity_energy,N_REFST,N_LCS,N_UNMONITORED)
+    if algorithm == 'IRL1ND':
+        """ Uses cvxopt library """
+        h_prev = np.zeros(N)
+        epsilon = 1e-2
+        w = 1/(h_prev+epsilon)
+        n_it = 20
+        it = 0
+        locations_monitored = []
+        locations_unmonitored = []
+        primal_start = {'x':[],'sl':[],'ss':[]}
+        # iterative method
+        time_init = time.time()
+        while len(locations_monitored) + len(locations_unmonitored) != N:
+            # solve sensor placement with constraints
+            sensor_placement.initialize_problem(Psi,rho=deployed_network_accuracy_threshold,
+                                                w=w,locations_monitored=locations_monitored,locations_unmonitored=locations_unmonitored,
+                                                epsilon=epsilon,primal_start=primal_start)
+            if sensor_placement.problem['status'] == 'optimal':
+                # get solution
+                primal_start['x'] = sensor_placement.problem['x']
+                primal_start['sl'] = sensor_placement.problem['sl']
+                primal_start['ss'] = sensor_placement.problem['ss']
+                # update sets
+                new_monitored = [int(i[0]) for i in np.argwhere(sensor_placement.h >= 1-epsilon) if i[0] not in locations_monitored]
+                new_unmonitored = [int(i[0]) for i in np.argwhere(sensor_placement.h <= epsilon) if i[0] not in locations_unmonitored]
+                locations_monitored += new_monitored
+                locations_unmonitored += new_unmonitored
+                # check convergence
+                if np.linalg.norm(sensor_placement.h - h_prev)<=epsilon or it==n_it:
+                    locations_monitored += [[int(i[0]) for i in np.argsort(sensor_placement.h,axis=0)[::-1] if i not in locations_monitored][0]]
+                    it = 0
+                h_prev = sensor_placement.h
+                w = 1/(h_prev + epsilon)
+                it +=1
+                print(f'Iteration results\n ->Primal objective: {sensor_placement.problem["primal objective"]:.6f}\n ->{len(locations_monitored) + len(locations_unmonitored)} locations assigned\n ->{len(locations_monitored)} monitored locations\n ->{len(locations_unmonitored)} unmonitored locations\n')
+            else:
+                # solver fails at iteration
+                locations_monitored = locations_monitored[:-len(new_monitored)]
+                locations_unmonitored = locations_unmonitored[:-len(new_unmonitored)]
+                it+=1
+        time_end = time.time()
+        
+        sensor_placement.locations = [[],np.sort(locations_monitored),np.sort(locations_unmonitored)]
+        sensor_placement.C_matrix()
+        """
+        pool = multiprocessing.Pool(processes=4)
+        print(pool.map(func2, range(n)))
+        pool.close()
+        pool.join()
+        """
     
-    if algorithm == 'NetworkPlanning_iterative':
+    elif algorithm == 'IRL1ND_candes':
+        """ No wrapper for iterating until all locations are assigned"""
+        h_prev = np.zeros(N)
+        epsilon = 1e-2
+        w = 1/(h_prev+epsilon)
+        n_it = 100
+        it = 0
+        locations_monitored = []
+        locations_unmonitored = []
+        # iterative method
+        time_init = time.time()
+        
+        while it < n_it:
+            # solve sensor placement with constraints
+            sensor_placement.initialize_problem(Psi,rho=deployed_network_accuracy_threshold,
+                                                w=w,locations_monitored=locations_monitored,locations_unmonitored=locations_unmonitored)
+        
+            if np.linalg.norm(sensor_placement.h - h_prev)<=epsilon:
+                print(f'Convergence criteria reached: {np.linalg.norm(sensor_placement.h - h_prev):.2e}')
+                break
+            h_prev = sensor_placement.h.copy()
+            w = 1/(h_prev + epsilon)
+            it +=1
+        
+        time_end = time.time()
+        n_sensors = int(np.ceil(sensor_placement.problem['primal objective']))
+        locations_monitored = np.argsort([i[0] for i in sensor_placement.h])[-n_sensors:]
+        locations_unmonitored = [i for i in np.arange(sensor_placement.n)if i not in locations_monitored]
+        sensor_placement.locations = [[],np.sort(locations_monitored),np.sort(locations_unmonitored)]
+        sensor_placement.C_matrix()
+        print(f'{len(locations_monitored)} Locations monitored: {locations_monitored}\n{len(locations_unmonitored)} Locations unmonitored: {locations_unmonitored}\n')
+
+    elif algorithm == 'NetworkPlanning_iterative':
+        """ Uses cvxpy library. LMIs are not explicitly expressed """
         # algorithm initialization
         h_prev = np.zeros(N)
-        epsilon = 1e-3
+        epsilon = 1e-2
         w = 1/(h_prev+epsilon)
         n_it = 3
         it = 0
@@ -945,8 +1263,140 @@ if __name__ == '__main__':
         sensor_placement.discretize_solution()
         time_end = time.time()
         sensor_placement.C_matrix()
+
+
+    elif algorithm == 'IRNet_ROI':
+        """ algorithm for large-scale deployments. Uses cvxopt library"""
+        algorithm = 'IRL1ND'#['IRL1ND','IRNet_ROI']
+        epsilon = 1e-2
+        n_it = 20
+        locations_monitored = []
+        locations_unmonitored = []
+        locations_monitored_roi = []
+        locations_unmonitored_roi = []
+
+        idx_roi = np.array([],dtype=int)
+        n_elements_roi = 20
+        idx_range = np.arange(0,Psi.shape[0],1)
+        rng.shuffle(idx_range)
+
+        #if N%n_elements_roi != 0:
+        #    raise ValueError(f'Number of elements per ROI ({n_elements_roi}) mismatch total number of potential locations in network ({N})')
+
+        # randomly select group of entries of Psi matrix
+        time_init = time.time()
+        for i in np.arange(0,N,n_elements_roi):
+            # select new ROI and append to previous ROI
+            idx_roi_new = idx_range[i:i+n_elements_roi]
+            print(f'\n\nNumber of elements in new ROI: {len(idx_roi_new)}')
+            print(f'New ROI covers indices {idx_roi_new}')
+            if len(idx_roi_new) == 0:
+                print(f'Empty ROI')
+                continue
+            # idx_roi contains indices from large matrix that compose the ROI
+            idx_roi = np.sort(np.unique(np.concatenate((idx_roi,idx_roi_new),axis=0,dtype=np.int64)))
+            print(f'Indices in union of cumulative ROI: {idx_roi}')
+            if len(idx_roi) < sparsity_energy:
+                print(f'Current ROI has less elements ({len(idx_roi)}) than signal sparsity ({sparsity_energy}).\nSkipping to new ROI to increase the number of elements')
+                continue
+            Psi_roi = Psi[idx_roi,:]
+            fully_monitored_network_max_variance_roi = np.diag(Psi_roi@np.linalg.inv(Psi_roi.T@Psi_roi)@Psi_roi.T).max()
+            #fully_monitored_network_max_variance_roi = np.diag(Psi@np.linalg.inv(Psi.T@Psi)@Psi.T)[idx_roi].max()
+            # determine design threshold on current ROI
+            deployed_network_variance_threshold_roi = variance_threshold_ratio*fully_monitored_network_max_variance_roi
+            n_roi = Psi_roi.shape[0]
+            print(f'Number of potential locations in ROI: {n_roi}')
+            print(f'Fully monitored max error variance in ROI: {fully_monitored_network_max_variance_roi:.2f}\nDesign max error variance in ROI: {deployed_network_variance_threshold_roi:.2f}')
+            print(f'Overall fully monitored max error variance: {fully_monitored_network_max_variance:.2f}\nOverall design max error variance: {deployed_network_accuracy_threshold:.2f}')
+
+            # IRNet method parameters            
+            sensor_placement = SensorPlacement(algorithm,n_roi,sparsity_energy,n_refst=n_roi,n_lcs=0,n_unmonitored=0)
+            epsilon_zero = epsilon#/10
+            primal_start_roi = {'x':[],'sl':[],'ss':[]}
+            it_roi = 0
+            h_prev_roi = np.zeros(n_roi)
+            weights_roi = 1/(h_prev_roi+epsilon)
+            # carry monitored locations from previous ROI step
+            # algorithm output for locations_monitored_roi contains indices (0...len(Psi_roi)). Convert to overall indices in original matrix
+            if len(locations_monitored)!=0:
+                locations_monitored_roi = np.where(np.isin(idx_roi,locations_monitored))[0].tolist()
+            else:
+                locations_monitored_roi = []
+            print(f'Monitored locations from previous step: {locations_monitored_roi}')
+
+            if len(locations_unmonitored)!=0:
+                locations_unmonitored_roi = np.where(np.isin(idx_roi,locations_unmonitored))[0].tolist()
+            else:
+                locations_unmonitored_roi = []
+            print(f'Unmonitored locations from previous step: {locations_unmonitored_roi}')
+            
+            new_monitored_roi = []
+            new_unmonitored_roi = []
+
+            # begin IRNet iterations
+            while len(locations_monitored_roi) + len(locations_unmonitored_roi) != n_roi:
+                print(f'New monitored indices: {new_monitored_roi}')
+                print(f'New unmonitored indices: {new_unmonitored_roi}')
+                # solve sensor placement with constraints
+                sensor_placement.initialize_problem(Psi_roi,rho=deployed_network_variance_threshold_roi,w=weights_roi,epsilon=epsilon,
+                                                locations_monitored=locations_monitored_roi,locations_unmonitored = locations_unmonitored_roi,
+                                                primal_start=primal_start_roi)
+                
+                if sensor_placement.problem['status'] == 'optimal':
+                    # get solution dictionary
+                    print(f'Optimization locations results: {sensor_placement.h}')
+                    primal_start_roi['x'] = sensor_placement.problem['x']
+                    primal_start_roi['sl'] = sensor_placement.problem['sl']
+                    primal_start_roi['ss'] = sensor_placement.problem['ss']
+                    # update sets: get entries (from constrained basis) of monitored and unmonitored locations
+                    new_monitored_roi = [int(i[0]) for i in np.argwhere(sensor_placement.h >= 1-epsilon) if i[0] not in locations_monitored_roi]
+                    new_unmonitored_roi = [int(i[0]) for i in np.argwhere(sensor_placement.h <= epsilon_zero) if i[0] not in locations_unmonitored_roi]
+                    locations_monitored_roi += new_monitored_roi
+                    locations_unmonitored_roi += new_unmonitored_roi
+                    # check convergence: update entries of monitored locations
+                    if np.linalg.norm(sensor_placement.h - h_prev_roi)<=epsilon or it_roi==n_it:
+                        new_monitored_roi = [[int(i[0]) for i in np.argsort(sensor_placement.h,axis=0)[::-1] if i not in locations_monitored_roi][0]]
+                        locations_monitored_roi += new_monitored_roi
+                        it_roi = 0
+                        print(f'Maximum iteration reached. Updating locations monitored ({len(locations_monitored_roi)}): {locations_monitored_roi}')
+                    h_prev_roi = sensor_placement.h
+                    weights_roi = 1/(h_prev_roi + epsilon)
+                    it_roi +=1
+                    print(f'Iteration results\n ->Primal objective: {sensor_placement.problem["primal objective"]:.6f}\n ->{len(locations_monitored_roi) + len(locations_unmonitored_roi)} locations assigned\n ->{len(locations_monitored_roi)} monitored locations\n ->{len(locations_unmonitored_roi)} unmonitored locations\n Basis indices of monitored locations at iteration: {locations_monitored_roi}\n Basis indices of unmonitored locations at iteration: {locations_unmonitored_roi} ')
+                    sys.stdout.flush()
+                
+                elif sensor_placement.problem['status'] == 'unknown':
+                    print('Problem status')
+                    print(sensor_placement.problem['status'])
+
+                    if np.linalg.norm(sensor_placement.h - h_prev_roi)<=epsilon or it_roi==n_it:
+                        new_monitored_roi = [[int(i[0]) for i in np.argsort(sensor_placement.h,axis=0)[::-1] if i not in locations_monitored_roi][0]]
+                        locations_monitored_roi += new_monitored_roi
+                        it_roi = 0
+                        print(f'Maximum iteration reached. Updating locations monitored ({len(locations_monitored_roi)}): {locations_monitored_roi}')
+
+                    it_roi += 1
+                else: # unfeasible solution: step back and free an unmonitored location
+                    print('Problem status')
+                    print(sensor_placement.problem['status'])
+                    # solver fails at iteration
+                    #locations_monitored = locations_monitored[:-len(new_monitored)]
+                    locations_unmonitored_roi = locations_unmonitored_roi[:-len(new_unmonitored_roi)]
+                    it_roi+=1
+                
+            
+            # add monitored locations from ROI to list of overall monitored locations of original basis entries
+            locations_monitored = list(idx_roi[locations_monitored_roi])
+            locations_unmonitored = list(idx_roi[locations_unmonitored_roi])
+            print(f'ROI results:\n Locations monitored ({len(locations_monitored)}): {locations_monitored}\n Unmonitored locations ({len(locations_unmonitored)}): {locations_unmonitored}')
+            
+
+        time_end = time.time()
+        sensor_placement.locations = [[],np.sort(locations_monitored),np.sort(locations_unmonitored)]
+        sensor_placement.C_matrix()
+
     deployed_network_accuracy = np.diag(Psi@np.linalg.inv(Psi.T@sensor_placement.C[1].T@sensor_placement.C[1]@Psi)@Psi.T).max()
-    print(f'Discretized network solution:\n- Number of potentiaql locations: {sensor_placement.n}\n- Number of monitored locations: {sensor_placement.locations[1].shape}\n- Number of unmonitored locations: {sensor_placement.locations[2].shape}\n- Fully monitoring network maximum signal variance: {fully_monitored_network_worst_accuracy:.2f}\n- Deployed monitoring network threshold: {deployed_network_accuracy_threshold:.2f}\n- Deployed monitoring network maximum variance: {deployed_network_accuracy:.2f}')
+    print(f'Discretized network solution:\n- Number of potential locations: {sensor_placement.n}\n- Number of monitored locations: {sensor_placement.locations[1].shape}\nMonitored locations: {sensor_placement.locations[1]}\n- Number of unmonitored locations: {sensor_placement.locations[2].shape}\n- Fully monitoring network maximum signal variance: {fully_monitored_network_max_variance:.2f}\n- Network design worst coordinate error variance threshold: {deployed_network_accuracy_threshold:.2f}\n- Deployed monitoring network maximum variance: {deployed_network_accuracy:.2f}')
     print("\u0332".join(f"Finished in {time_end-time_init:.2f}s"))
     
-    sys.exit()
+    

@@ -109,7 +109,7 @@ class DataSet():
 
     def save_dataset(self):
         fname = f'{self.files_path}{self.pollutant}_catalonia_{self.startDate}_{self.endDate}.csv'
-        self.ds.to_csv(fname,sep=',')
+        self.ds.to_csv(fname,sep=',',index=True)
         print(f'dataset saved to {fname}')
 
 if __name__ == '__main__':

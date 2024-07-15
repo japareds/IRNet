@@ -23,6 +23,11 @@ class Dataset():
         self.ds.index = pd.to_datetime(self.ds.index)
         print(f'Loaded dataset with {self.ds.shape[0]} measurements for {self.ds.shape[1]} locations.\n{self.ds.head()}')
 
+    def time_window(self,start_date='2018',end_date='2023'):
+        """ Time windowing of measurements. Fabra reference stations has measurements from 2018"""
+        date_range = pd.date_range(start=start_date,end=end_date,freq='H')
+        self.ds = self.ds.loc[np.isin(self.ds.index,date_range)]
+        
     def cleanMissingvalues(self,strategy='remove',tol=0.1):
         """
         Remove missing values from data set.
@@ -64,11 +69,11 @@ class Dataset():
             print(f'Entries with missing values remiaining:\n{self.ds.isna().sum()}')
     
     def save_dataset(self):
-        fname = f'{self.files_path}{self.pollutant}_catalonia_clean_{self.start_date}_{self.end_date}.csv'
+        fname = f'{self.files_path}{self.pollutant}_catalonia_clean_N{self.ds.shape[1]}_{self.start_date}_{self.end_date}.csv'
         self.ds.to_csv(fname,sep=',')
         print(f'Dataset saved to {fname}')
 
-    
+
 if __name__ == '__main__':
     abs_path = os.path.dirname(os.path.realpath(__file__))
     files_path = os.path.abspath(os.path.join(abs_path,os.pardir)) + '/files/catalonia/'
@@ -78,9 +83,10 @@ if __name__ == '__main__':
 
     dataset = Dataset(pollutant,start_date,end_date,files_path)
     dataset.load_dataset()
+    #dataset.time_window(start_date='2018',end_date='2023')
     dataset.cleanMissingvalues(strategy='stations',tol=0.1)
     print(f'New dataset dataset has {dataset.ds.shape[0]} measurements for {dataset.ds.shape[1]} locations.\n{dataset.ds.head()}')
-    dataset.cleanMissingvalues(strategy='interpolate')
+    #dataset.cleanMissingvalues(strategy='interpolate')
     dataset.cleanMissingvalues(strategy='remove')
     print(f'New dataset dataset has {dataset.ds.shape[0]} measurements for {dataset.ds.shape[1]} locations.\n{dataset.ds.head()}')
     dataset.save_dataset()
