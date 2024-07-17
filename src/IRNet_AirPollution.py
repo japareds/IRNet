@@ -100,8 +100,40 @@ def define_rois_variance(coordinate_error_variance_fullymonitored:list,variance_
     
     return roi_idx
         
+def define_rois_random(seed:int,n:int,n_regions:int)->dict:
+    rng = np.random.default_rng(seed=seed)
+    indices = np.arange(0,n,1)
+    indices_perm = rng.permutation(indices)
+    roi_idx = {el:[] for el in np.arange(n_regions)}
+    indices_split = np.array_split(indices_perm,n_regions)
+    for i in np.arange(n_regions):
+        roi_idx[i] = indices_split[i]
+    return roi_idx
+
+def define_ROIs(dataset,Psi:np.ndarray,method:str,roi_threshold:list=[],random_seed:int=0,n_regions_random:int=2):
+    if method not in ['distance_based','variance_based','random_based']:
+        raise ValueError(f'Specified method {method} for splitting into ROIs not implemented yet.')
+
+    elif method == 'distance_based':
+        print('Distance based ROIs')
+        n_regions = len(roi_threshold)
+        roi_idx = define_rois_distance(dataset.distances,roi_threshold,n_regions)
+    
+    elif method == 'variance_based':
+        print('Variance based ROIs')
+        coordinate_error_variance_fullymonitored = np.diag(Psi@np.linalg.inv(Psi.T@Psi)@Psi.T)
+        n_regions = len(roi_threshold)
+        roi_idx = define_rois_variance(coordinate_error_variance_fullymonitored,roi_threshold,n_regions)
+    
+    elif method == 'random_based':
+        print('Random based ROIs')
+        n = Psi.shape[0]
+        roi_idx = define_rois_random(random_seed,n,n_regions_random)
+        roi_threshold = [i for i in roi_idx.keys()]
+        n_regions = n_regions_random
 
 
+    return roi_idx, roi_threshold, n_regions
 
 
 
@@ -241,6 +273,7 @@ def networkPlanning_iterative(sensor_placement:sp.SensorPlacement,N:int,Psi:np.n
     new_unmonitored = []
     while len(locations_monitored) + len(locations_unmonitored) != N:
         # solve sensor placement with constraints
+        
         sensor_placement.initialize_problem(Psi,rho=deployed_network_variance_threshold,
                                             w=weights,locations_monitored=locations_monitored,locations_unmonitored=locations_unmonitored)
         sensor_placement.solve()
@@ -257,6 +290,7 @@ def networkPlanning_iterative(sensor_placement:sp.SensorPlacement,N:int,Psi:np.n
                 locations_monitored += [[i for i in np.argsort(sensor_placement.h.value)[::-1] if i not in locations_monitored][0]]
                 it = 0
             h_prev = sensor_placement.h.value
+            weights_old = weights.copy()
             weights = 1/(h_prev + epsilon)
             it +=1
         else:
@@ -264,6 +298,7 @@ def networkPlanning_iterative(sensor_placement:sp.SensorPlacement,N:int,Psi:np.n
             #locations_monitored = locations_monitored[:-len(new_monitored)]
             if len(new_unmonitored) != 0:
                 locations_unmonitored = locations_unmonitored[:-len(new_unmonitored)]
+                weights = weights_old
             it+=1
 
         print(f'{len(locations_monitored)} Locations monitored: {locations_monitored}\n{len(locations_unmonitored)} Locations unmonitored: {locations_unmonitored}\n')
@@ -305,7 +340,7 @@ class Dataset():
 
 # figures
 class Figures():
-    def __init__(self,save_path,figx=3.5,figy=2.5,fs_title=10,fs_label=10,fs_ticks=10,fs_legend=10,marker_size=3,dpi=300,use_grid=False,show_plots=False):
+    def __init__(self,save_path,figx=2.5,figy=2.5,fs_title=10,fs_label=10,fs_ticks=10,fs_legend=10,marker_size=3,dpi=300,use_grid=False,show_plots=False):
         self.figx = figx
         self.figy = figy
         self.fs_title = fs_title
@@ -479,7 +514,7 @@ class Figures():
             fig.savefig(fname,dpi=300,format='png',bbox_inches='tight')
             print(f'Figure saved at {fname}')
 
-    def geographical_network_visualization(self,map_path:str,df_coordinates:pd.DataFrame,locations_monitored:np.array=[],roi_idx:dict={},show_legend:bool=False,save_fig:bool=False)->plt.figure:
+    def geographical_network_visualization(self,map_path:str,df_coordinates:pd.DataFrame,locations_monitored:np.array=[],roi_idx:dict={},show_legend:bool=False,show_deployed_sensors:bool=True,save_fig:bool=False)->plt.figure:
         """
         Figure showing the geographical area where sensors are deployed along with coordinates of reference stations
 
@@ -518,19 +553,28 @@ class Figures():
         try:
             if len(roi_idx)!=0:
                 markers = ['o','^']
-                for idx,m in zip(roi_idx.values(),markers):
-                    
-                    locations_monitored_roi = np.array(locations_monitored)[np.isin(locations_monitored,idx)]
+                colors = ['k','#943126']
+                if show_deployed_sensors:
+                    for idx,m in zip(roi_idx.values(),markers):
+                        
+                        locations_monitored_roi = np.array(locations_monitored)[np.isin(locations_monitored,idx)]
 
-                    df_coords_monitored = df_coordinates.iloc[[i for i in range(df_coordinates.shape[0]) if i in locations_monitored_roi]]
-                    geometry_monitored = [Point(xy) for xy in zip(df_coords_monitored['Longitude'], df_coords_monitored['Latitude'])]
-                    gdf_monitored = GeoDataFrame(df_coords_monitored, geometry=geometry_monitored)
-                    gdf_monitored.plot(ax=geo_map, marker=m, color='#943126', markersize=6,label=f'Monitoring node')
-                    
-                    df_coords_unmonitored = df_coordinates.iloc[[i for i in range(df_coordinates.shape[0]) if i in idx and i not in locations_monitored_roi]]
-                    geometry_unmonitored = [Point(xy) for xy in zip(df_coords_unmonitored['Longitude'], df_coords_unmonitored['Latitude'])]
-                    gdf_unmonitored = GeoDataFrame(df_coords_unmonitored, geometry=geometry_unmonitored)
-                    gdf_unmonitored.plot(ax=geo_map, marker=m, color='k', markersize=6,label=f'Unmonitored locations')    
+                        df_coords_monitored = df_coordinates.iloc[[i for i in range(df_coordinates.shape[0]) if i in locations_monitored_roi]]
+                        geometry_monitored = [Point(xy) for xy in zip(df_coords_monitored['Longitude'], df_coords_monitored['Latitude'])]
+                        gdf_monitored = GeoDataFrame(df_coords_monitored, geometry=geometry_monitored)
+                        gdf_monitored.plot(ax=geo_map, marker=m, color='#943126', markersize=6,label=f'Monitoring node')
+                        
+                        df_coords_unmonitored = df_coordinates.iloc[[i for i in range(df_coordinates.shape[0]) if i in idx and i not in locations_monitored_roi]]
+                        geometry_unmonitored = [Point(xy) for xy in zip(df_coords_unmonitored['Longitude'], df_coords_unmonitored['Latitude'])]
+                        gdf_unmonitored = GeoDataFrame(df_coords_unmonitored, geometry=geometry_unmonitored)
+                        gdf_unmonitored.plot(ax=geo_map, marker=m, color='k', markersize=6,label=f'Unmonitored locations') 
+                else:
+                    for i,idx,m,c in zip(range(len(roi_idx)),roi_idx.values(),markers,colors):
+                        
+                        df_coords_idx = df_coordinates.iloc[[i for i in range(df_coordinates.shape[0]) if i in idx]]
+                        geometry_idx = [Point(xy) for xy in zip(df_coords_idx['Longitude'], df_coords_idx['Latitude'])]
+                        gdf_monitored = GeoDataFrame(df_coords_idx, geometry=geometry_idx)
+                        gdf_monitored.plot(ax=geo_map, marker=m, color=c, markersize=6,label=f'ROI$_{i+1}$')
                 
             else:
                 gdf_monitored.plot(ax=geo_map, marker='o', color='#943126', markersize=6,label=f'Monitoring node')
@@ -544,12 +588,18 @@ class Figures():
         ax.set_xlabel('Longitude (degrees)')
 
         if show_legend:
-            ax.legend(loc='center',ncol=2,framealpha=1,bbox_to_anchor=(0.5,1.2))
+            if show_deployed_sensors:
+                ax.legend(loc='center',ncol=2,framealpha=1,bbox_to_anchor=(0.5,1.2))
+            else:
+                ax.legend(loc='center',ncol=2,framealpha=1,bbox_to_anchor=(0.5,1.1))
         ax.tick_params(axis='both', which='major')
         fig.tight_layout()
         
         if save_fig:
-            fname = self.save_path+f'Map_PotentialLocations_MonitoredLocations{df_coords_monitored.shape[0]}.png'
+            if show_deployed_sensors:
+                fname = self.save_path+f'Map_PotentialLocations_MonitoredLocations{df_coords_monitored.shape[0]}.png'
+            else:
+                fname = self.save_path+f'Map_PotentialLocations_{len(roi_idx)}ROIs.png'
             fig.savefig(fname,dpi=300,format='png',bbox_inches='tight')
             print(f'Figure saved at {fname}')
         return fig
@@ -829,7 +879,7 @@ class Figures():
             fig = plt.figure()
             ax = fig.add_subplot(111)
             # coordinate error variance at each location
-            ax.plot(coordinate_error_variance_fully_monitored_sorted,color='#1d8348',label='Fully monitored network')
+            ax.plot(coordinate_error_variance_fully_monitored_sorted,color='#943126',label='Fully monitored network')
             if len(errorvar_reconstruction_Dopt) !=0:
                 coordinate_error_variance_Dopt_sorted = np.concatenate([errorvar_reconstruction_Dopt[i] for i in roi_idx.values()])
                 ax.plot(coordinate_error_variance_Dopt_sorted,color='orange',label=f'Joshi-Boyd {n_sensors_Dopt} sensors',alpha=0.8)
@@ -849,12 +899,12 @@ class Figures():
             ax.set_xticklabels([i+1 for i in ax.get_xticks()])
             ax.set_xlim(-0.5,n)
             ax.set_xlabel('Location index')
-            yrange = np.arange(0,2.75,0.5)
+            yrange = np.arange(0,3.5,0.5)
             ax.set_yticks(yrange)
             ax.set_yticklabels([np.round(i,2) for i in ax.get_yticks()])
-            ax.set_ylim(0,2.5+0.1)
+            ax.set_ylim(0,3.0+0.1)
             ax.set_ylabel('Coordinate error variance')
-            ax.legend(loc='center',ncol=2,framealpha=0.5,bbox_to_anchor=(0.5,1.2))
+            ax.legend(loc='center',ncol=2,framealpha=0.5,bbox_to_anchor=(0.5,1.1))
             fig.tight_layout()
             if save_fig:
                 #fname = f'{self.save_path}Curve_errorVariance_Threshold{variance_threshold_ratio}_Nsensors{n_sensors}_NsensorsDopt{n_sensors_Dopt}_NsensorsROIDopt_{n_sensors_roi}.png'
@@ -887,7 +937,7 @@ class Figures():
             fname = f'{self.save_path}deploy_sensors_hourly_month{month}.png'
             fig.savefig(fname,dpi=300,format='png')
         return fig
-    
+
 
 if __name__ == '__main__':
     """ load dataset to use """
@@ -1009,7 +1059,7 @@ if __name__ == '__main__':
         print(f'Low-rank decomposition. Basis shape: {Psi.shape}')
         # initialize algorithm
         fully_monitored_network_max_variance = np.diag(Psi@np.linalg.inv(Psi.T@Psi)@Psi.T).max()
-        variance_threshold_ratio = 1.5
+        variance_threshold_ratio = 2.0
         deployed_network_variance_threshold = variance_threshold_ratio*fully_monitored_network_max_variance
         algorithm = 'NetworkPlanning_iterative'
         sensor_placement = sp.SensorPlacement(algorithm, n, signal_sparsity,
@@ -1065,27 +1115,19 @@ if __name__ == '__main__':
         n = Psi.shape[0]
         print(f'Low-rank decomposition. Basis shape: {Psi.shape}')
         # define ROIs with different threshold desings
-        distance_based_ROIs = False
-        if distance_based_ROIs:
-            print('Distance based ROIs')
-            distance_thresholds = [0,10] #km
-            roi_threshold =  distance_thresholds
-            n_regions = len(distance_thresholds)
-            roi_idx = define_rois_distance(dataset.distances,distance_thresholds,n_regions)
-        variance_based_ROIs = True
-        if variance_based_ROIs:
-            print('Variance based ROIs')
-            coordinate_error_variance_fullymonitored = np.diag(Psi@np.linalg.inv(Psi.T@Psi)@Psi.T)
-            variance_thresholds = [0,0.75]
-            roi_threshold = variance_thresholds
-            n_regions = len(variance_thresholds)
-            roi_idx = define_rois_variance(coordinate_error_variance_fullymonitored,variance_thresholds,n_regions)
-        
+        method = 'random_based'
+        if method == 'random_based':
+            random_seed = 0
+            n_regions_random = 3
+            roi_idx,roi_threshold,n_regions = define_ROIs(dataset,Psi,method=method,random_seed=random_seed,n_regions_random=n_regions_random)        
+        elif method == 'distance_based':
+            roi_threshold = [0,10,20]
+            roi_idx,roi_threshold,n_regions = define_ROIs(dataset,Psi,method=method,roi_threshold=roi_threshold)        
         # initialize algorithm
         Psi_new = np.concatenate([Psi[i,:] for i in roi_idx.values()])
         fully_monitored_network_max_variance = np.diag(Psi@np.linalg.inv(Psi.T@Psi)@Psi.T).max()
         fully_monitored_network_max_variance_ROI = [np.max(np.diag(Psi@np.linalg.inv(Psi.T@Psi)@Psi.T)[i]) for i in roi_idx.values()]
-        variance_threshold_ratio = [1.5,2.0]
+        variance_threshold_ratio = [1.5,3.0,5.0]
         if len(variance_threshold_ratio) != n_regions:
             raise ValueError(f'Number of user-defined thresholds ({len(variance_threshold_ratio)}) mismatch number of ROIs ({n_regions})')
         
@@ -1101,7 +1143,7 @@ if __name__ == '__main__':
         epsilon=1e-1 tends to fail at multiple thresholds as threshold <1.1
         """
         
-        epsilon = 2e-1
+        epsilon = 1e-1
         n_it = 20
         h_prev = np.zeros(n)
         weights = 1/(h_prev+epsilon)
@@ -1126,8 +1168,15 @@ if __name__ == '__main__':
         n_locations_unmonitored = len(locations[1])
         print(f'Network design results:\n- Total number of potential locations: {n}\n- basis sparsity: {signal_sparsity}\n- Number of monitored locations: {n_locations_monitored}\n- Number of unmonitored locations: {n_locations_unmonitored}')
         print(f'- Overall fully monitored max variance: {fully_monitored_network_max_variance}\n- Fully monitored max variance per ROI: {fully_monitored_network_max_variance_ROI}\n- Max variance design threshold per ROI: {[np.unique(deployed_network_variance_threshold)]}\n- Overall deployed network max variance: {worst_coordinate_variance}\n- Deployed network max variance per ROI: {[np.max(worst_coordinate_variance_ROIs[i]) for i in roi_idx.values()]}')
+        for i in range(n_regions):
+            if [np.max(worst_coordinate_variance_ROIs[j]) for j in roi_idx.values()][i]>variance_threshold_ratio[i]*fully_monitored_network_max_variance_ROI[i]:
+                warnings.warn(f'Region of interest {i} failed to fulfill design threshold')
+
         # save results
-        fname = f'{results_path}SensorsLocations_N{n}_S{signal_sparsity}_VarThreshold{variance_threshold_ratio}_nSensors{n_locations_monitored}.pkl'
+        if method == 'random_based':
+            fname = f'{results_path}SensorsLocations_N{n}_S{signal_sparsity}_VarThreshold{variance_threshold_ratio}_nSensors{n_locations_monitored}_randomSeed{random_seed}.pkl'
+        else:
+            fname = f'{results_path}SensorsLocations_N{n}_S{signal_sparsity}_VarThreshold{variance_threshold_ratio}_nSensors{n_locations_monitored}.pkl'
         with open(fname,'wb') as f:
             pickle.dump(locations[0],f,protocol=pickle.HIGHEST_PROTOCOL)
         print(f'File saved in {fname}')
@@ -1181,10 +1230,15 @@ if __name__ == '__main__':
             variance_threshold_ratio = 1.3
             n_sensors = 41
         else:
-            variance_threshold_ratio = [2.0,2.5]
-            n_sensors = 40
-            n_sensors_Dopt = 40
-            #n_sensorsROI = [5,35]
+            method = 'random_based'
+            # random ROIs parameters
+            random_seed = 0
+            n_regions_random = 3
+            # Network design and D-opt parameters for loading results
+            variance_threshold_ratio = [1.5,3.0,5.0]
+            n_sensors = 39
+            n_sensors_Dopt = 39
+            
 
         # low-rank decomposition
         snapshots_matrix_train = X_train.to_numpy().T
@@ -1212,21 +1266,8 @@ if __name__ == '__main__':
             worst_variance_fullymonitored = np.diag(error_variance_fullymonitored).max()
             rmse_fullymonitored = np.sqrt(np.trace(error_variance_fullymonitored)/n)
         else:
-            distance_based_ROIs = False
-            if distance_based_ROIs:
-                print('Distance based ROIs')
-                distance_thresholds = [0,10] #km
-                roi_threshold =  distance_thresholds
-                n_regions = len(distance_thresholds)
-                roi_idx = define_rois_distance(dataset.distances,distance_thresholds,n_regions)
-            variance_based_ROIs = True
-            if variance_based_ROIs:
-                print('Variance based ROIs')
-                coordinate_error_variance_fullymonitored = np.diag(Psi@np.linalg.inv(Psi.T@Psi)@Psi.T)
-                variance_thresholds = [0,0.75]
-                roi_threshold = variance_thresholds
-                n_regions = len(variance_thresholds)
-                roi_idx = define_rois_variance(coordinate_error_variance_fullymonitored,variance_thresholds,n_regions)
+            if method == 'random_based':
+                roi_idx,roi_threshold,n_regions = define_ROIs(dataset,Psi,method=method,random_seed=random_seed,n_regions_random=n_regions_random)
 
             error_variance_fullymonitored_roi = [(Psi@np.linalg.inv(Psi.T@Psi)@Psi.T)[i] for i in roi_idx.values()]
             worst_variance_fullymonitored_roi = [np.max(np.diag(Psi@np.linalg.inv(Psi.T@Psi)@Psi.T)[i]) for i in roi_idx.values()]
@@ -1237,10 +1278,10 @@ if __name__ == '__main__':
         if homogeneous_threshold:
             fname = f'{results_path}NetworkDesign/homogeneous/SensorsLocations_N{n}_S{signal_sparsity}_VarThreshold{variance_threshold_ratio:.2f}_nSensors{n_sensors}.pkl'
         else:
-            if distance_based_ROIs:
-                fname = f'{results_path}NetworkDesign/heterogeneous/distance_based/SensorsLocations_N{n}_S{signal_sparsity}_VarThreshold{variance_threshold_ratio}_nSensors{n_sensors}.pkl'
-            elif variance_based_ROIs:
-                fname = f'{results_path}NetworkDesign/heterogeneous/variance_based/SensorsLocations_N{n}_S{signal_sparsity}_VarThreshold{variance_threshold_ratio}_nSensors{n_sensors}.pkl'
+            if method == 'random_based':
+                fname = f'{results_path}NetworkDesign/heterogeneous/{method}/SensorsLocations_N{n}_S{signal_sparsity}_VarThreshold{variance_threshold_ratio}_nSensors{n_sensors}_randomSeed{random_seed}.pkl'
+            else:
+                fname = f'{results_path}NetworkDesign/heterogeneous/{method}/SensorsLocations_N{n}_S{signal_sparsity}_VarThreshold{variance_threshold_ratio}_nSensors{n_sensors}.pkl'
         with open(fname,'rb') as f:
             locations_monitored = np.sort(pickle.load(f))
         locations_unmonitored = [i for i in np.arange(n) if i not in locations_monitored]
@@ -1274,10 +1315,10 @@ if __name__ == '__main__':
                 if homogeneous_threshold:
                     fname = f'{results_path}Dopt/homogeneous/SensorsLocations_N{n}_S{signal_sparsity}_nSensors{n_locations_monitored}.pkl'
                 else:
-                    if distance_based_ROIs:
-                        fname = f'{results_path}Dopt/heterogeneous/distance_based/SensorsLocations_N{n}_S{signal_sparsity}_nSensors{n_sensors_Dopt}_nSensorsROI{n_sensorsROI}.pkl'
+                    if method == 'random_based':
+                        fname = f'{results_path}Dopt/heterogeneous/{method}/SensorsLocations_Boyd_N{n}_S{signal_sparsity}_VarThreshold{variance_threshold_ratio}_nSensors{n_sensors_Dopt}_randomSeed{random_seed}.pkl'
                     else:
-                        fname = f'{results_path}Dopt/heterogeneous/variance_based/SensorsLocations_Boyd_N{n}_S{signal_sparsity}_VarThreshold{variance_threshold_ratio}_nSensors{n_sensors_Dopt}.pkl'
+                        fname = f'{results_path}Dopt/heterogeneous/{method}/SensorsLocations_Boyd_N{n}_S{signal_sparsity}_VarThreshold{variance_threshold_ratio}_nSensors{n_sensors_Dopt}.pkl'
                 print(f'Loading D-opt solution from {fname}')
                 with open(fname,'rb') as f:
                     locations_monitored_Dopt = np.sort(pickle.load(f))
@@ -1321,7 +1362,7 @@ if __name__ == '__main__':
 
         # visualize        
         plots = Figures(save_path=results_path,marker_size=1,
-                        fs_label=14,fs_ticks=8,fs_legend=6,fs_title=10,
+                        fs_label=8,fs_ticks=8,fs_legend=4.5,fs_title=10,
                         show_plots=True)
             
         if homogeneous_threshold:
@@ -1340,12 +1381,13 @@ if __name__ == '__main__':
                                                  np.diag(error_variance_Dopt),save_fig=False)
         else:
             plots.geographical_network_visualization(map_path=f'{files_path}ll_autonomicas_inspire_peninbal_etrs89/',df_coordinates=dataset.coordinates.reindex(dataset.distances.index),
-                                        locations_monitored=locations_monitored_Dopt,roi_idx=roi_idx,show_legend=True,save_fig=False)
+                                        locations_monitored=locations_monitored_Dopt,roi_idx=roi_idx,show_legend=True,
+                                        show_deployed_sensors=False,save_fig=False)
 
             plots.curve_errorvariance_comparison(np.diag(error_variance_fullymonitored),np.diag(error_variance_design),
                                                  variance_threshold_ratio,worst_variance_fullymonitored_roi,
                                                  n,n_locations_monitored,
-                                                 np.diag(error_variance_Dopt),roi_idx,n_sensors_Dopt,save_fig=True)
+                                                 np.diag(error_variance_Dopt),roi_idx,n_sensors_Dopt,save_fig=False)
                     
         plt.show()
         sys.exit()
