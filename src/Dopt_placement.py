@@ -46,7 +46,7 @@ def add_noise_signal(X:pd.DataFrame,seed:int=92,var:float=1.)->pd.DataFrame:
     #X_noisy[X_noisy<0] = 0.
     return X_noisy
 
-def define_rois_distance(Psi:np.ndarray,distances:pd.Series,distance_thresholds:list,n_regions:int)-> dict: 
+def define_rois_distance(distances:pd.Series,distance_thresholds:list,n_regions:int)-> dict: 
     """
     Generates Regions of Interest (ROIs) based on distance from certain station
 
@@ -101,7 +101,42 @@ def define_rois_variance(Psi:np.ndarray,coordinate_error_variance_fullymonitored
     roi_idx[variance_thresholds[-1]] = idx_stations
     
     return roi_idx
-        
+
+def define_rois_random(seed:int,n:int,n_regions:int)->dict:
+    rng = np.random.default_rng(seed=seed)
+    indices = np.arange(0,n,1)
+    indices_perm = rng.permutation(indices)
+    roi_idx = {el:[] for el in np.arange(n_regions)}
+    indices_split = np.array_split(indices_perm,n_regions)
+    for i in np.arange(n_regions):
+        roi_idx[i] = indices_split[i]
+    return roi_idx
+
+def define_ROIs(dataset,Psi:np.ndarray,method:str,roi_threshold:list=[],random_seed:int=0,n_regions_random:int=2):
+    if method not in ['distance_based','variance_based','random_based']:
+        raise ValueError(f'Specified method {method} for splitting into ROIs not implemented yet.')
+
+    elif method == 'distance_based':
+        print('Distance based ROIs')
+        n_regions = len(roi_threshold)
+        roi_idx = define_rois_distance(dataset.distances,roi_threshold,n_regions)
+    
+    elif method == 'variance_based':
+        print('Variance based ROIs')
+        coordinate_error_variance_fullymonitored = np.diag(Psi@np.linalg.inv(Psi.T@Psi)@Psi.T)
+        n_regions = len(roi_threshold)
+        roi_idx = define_rois_variance(coordinate_error_variance_fullymonitored,roi_threshold,n_regions)
+    
+    elif method == 'random_based':
+        print('Random based ROIs')
+        n = Psi.shape[0]
+        roi_idx = define_rois_random(random_seed,n,n_regions_random)
+        roi_threshold = [i for i in roi_idx.keys()]
+        n_regions = n_regions_random
+
+
+    return roi_idx, roi_threshold, n_regions
+
 
 # signal reconstruction functions
 def signal_reconstruction_svd(U:np.ndarray,snapshots_matrix_train:np.ndarray,snapshots_matrix_val_centered:np.ndarray,X_val:pd.DataFrame,s_range:np.ndarray) -> pd.DataFrame:
@@ -276,13 +311,15 @@ def Joshi_Boyd_VarianceThreshold(roi_idx:dict,roi_threshold:list,variance_thresh
     locations_unmonitored_roi = []       
     
     """ Iterate over ROIs. The solutions of previous ROIs are used onto the next union of ROIs"""
-    if reverse_roi_order:
-        iterator = range(len(roi_threshold))[::-1]
-    else:
-        iterator = range(len(roi_threshold))
+
+    
+    iterator = range(len(roi_threshold))
     indices_rois = [i for i in roi_idx.values()]
     for i in iterator: # ROI iteration
-        indices = np.sort(np.concatenate([roi_idx[j] for j in roi_threshold[:i+1]]))
+        if reverse_roi_order:
+            indices = np.sort(np.concatenate([roi_idx[j] for j in roi_threshold[::-1][:i+1]]))
+        else:
+            indices = np.sort(np.concatenate([roi_idx[j] for j in roi_threshold[:i+1]]))
         snapshots_matrix_roi = snapshots_matrix_train_centered[indices,:]
         U_roi,sing_vals_roi,Vt_roi = np.linalg.svd(snapshots_matrix_roi,full_matrices=False)
         energy_roi = np.cumsum(sing_vals_roi)/np.sum(sing_vals_roi)
@@ -312,7 +349,10 @@ def Joshi_Boyd_VarianceThreshold(roi_idx:dict,roi_threshold:list,variance_thresh
             locations = sensor_placement.locations[1]
             sensor_placement.C_matrix()
             # compute coordinate error variance restricted to different ROIs that compose the union of ROIs
-            idx_rois = [np.where(np.isin(indices,indices_rois[k]))[0] for k in range(i+1)]
+            if reverse_roi_order:
+                idx_rois = [np.where(np.isin(indices,indices_rois[::-1][k]))[0] for k in range(i+1)]
+            else:
+                idx_rois = [np.where(np.isin(indices,indices_rois[k]))[0] for k in range(i+1)]
             # idx_monitored = [i for i in indices[idx] if i in indices[locations]]
             # idx_monitored = np.where(np.isin(indices,idx_monitored))[0]
             covariance_matrix_fullymonitored_roi = Psi_roi@np.linalg.inv(Psi_roi.T@Psi_roi)@Psi_roi.T
@@ -322,8 +362,12 @@ def Joshi_Boyd_VarianceThreshold(roi_idx:dict,roi_threshold:list,variance_thresh
             n_rois_fullfilled = 0
             if n_sensors_roi != force_n:
                 for k in range(i+1):
-                    if worst_coordinate_variance_roi[k] < variance_threshold_ratio[k]*worst_coordinate_variance_fullymonitored_roi[k]:
-                            n_rois_fullfilled +=1
+                    if reverse_roi_order:
+                        if worst_coordinate_variance_roi[k] < variance_threshold_ratio[::-1][k]*worst_coordinate_variance_fullymonitored_roi[k]:
+                                n_rois_fullfilled +=1
+                    else:
+                        if worst_coordinate_variance_roi[k] < variance_threshold_ratio[k]*worst_coordinate_variance_fullymonitored_roi[k]:
+                                n_rois_fullfilled +=1
                 if n_rois_fullfilled == i+1:
                     locations_monitored_roi = sensor_placement.locations[1]
                     locations_monitored = indices[locations_monitored_roi]
@@ -936,22 +980,17 @@ if __name__ == '__main__':
         n = Psi.shape[0]
         
         # define ROIs
-        distance_based_ROIs = False
-        if distance_based_ROIs:
-            print('Distance based ROIs')
-            distance_thresholds = [0,10] #km
-            roi_threshold =  distance_thresholds
-            n_regions = len(distance_thresholds)
-            roi_idx = define_rois_distance(Psi,dataset.distances,distance_thresholds,n_regions)
-        variance_based_ROIs = True
-        if variance_based_ROIs:
-            print('Variance based ROIs')
-            coordinate_error_variance_fullymonitored = np.diag(Psi@np.linalg.inv(Psi.T@Psi)@Psi.T)
-            variance_thresholds = [0,0.75]
-            roi_threshold = variance_thresholds
-            n_regions = len(variance_thresholds)
-            roi_idx = define_rois_variance(Psi,coordinate_error_variance_fullymonitored,variance_thresholds,n_regions)
-        variance_threshold_ratio = [2.0,2.5]
+        method = 'random_based'
+        if method == 'random_based':
+            random_seed = 0
+            n_regions_random = 3
+            roi_idx,roi_threshold,n_regions = define_ROIs(dataset,Psi,method=method,random_seed=random_seed,n_regions_random=n_regions_random)        
+        elif method == 'distance_based':
+            roi_threshold = [0,10,20]
+            roi_idx,roi_threshold,n_regions = define_ROIs(dataset,Psi,method=method,roi_threshold=roi_threshold)        
+
+        variance_threshold_ratio = [1.5,3.0,5.0]
+
         if len(variance_threshold_ratio) != n_regions:
             raise ValueError(f'Number of user-defined thresholds ({len(variance_threshold_ratio)}) mismatch number of ROIs ({n_regions})')
 
@@ -960,7 +999,7 @@ if __name__ == '__main__':
         #sensor_placement = Joshi_Boyd_ROIs(roi_idx,roi_threshold,n_sensors_per_roi,snapshots_matrix_train_centered)
         sensor_placement = Joshi_Boyd_VarianceThreshold(roi_idx,roi_threshold,
                                                         variance_threshold_ratio,snapshots_matrix_train_centered,
-                                                        reverse_roi_order=False,force_n=40)
+                                                        reverse_roi_order=True,force_n=39)
         locations = [sensor_placement.locations[1],[i for i in np.arange(n) if i not in sensor_placement.locations[1]]]
         sensor_placement.C_matrix()
         # deploy sensors and compute variance
@@ -970,7 +1009,10 @@ if __name__ == '__main__':
         n_locations_unmonitored = len(locations[1])
         print(f'Network planning results:\n- Total number of potential locations: {n}\n- basis sparsity: {signal_sparsity}\n- Deployed network max variance: {worst_coordinate_variance:.2f}\n- Number of monitored locations: {n_locations_monitored}\n- Number of unmonitored locations: {n_locations_unmonitored}\n')
         # save results
-        fname = f'{results_path}SensorsLocations_Boyd_N{n}_S{signal_sparsity}_VarThreshold{variance_threshold_ratio}_nSensors{n_locations_monitored}.pkl'
+        if method == 'random_based':
+            fname = f'{results_path}SensorsLocations_Boyd_N{n}_S{signal_sparsity}_VarThreshold{variance_threshold_ratio}_nSensors{n_locations_monitored}_randomSeed{random_seed}.pkl'
+        else:
+            fname = f'{results_path}SensorsLocations_Boyd_N{n}_S{signal_sparsity}_VarThreshold{variance_threshold_ratio}_nSensors{n_locations_monitored}.pkl'
         with open(fname,'wb') as f:
             pickle.dump(locations[0],f,protocol=pickle.HIGHEST_PROTOCOL)
         print(f'File saved in {fname}')

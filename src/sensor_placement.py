@@ -733,7 +733,8 @@ class SensorPlacement:
         # general solving process
         else:
             try:
-                self.problem.solve(verbose=True)
+                solver = cp.MOSEK
+                self.problem.solve(verbose=True,solver=solver)
                 if self.problem.status not in ["infeasible", "unbounded"]:
                     print(f'Optimal value: {self.problem.value}')
             except:
