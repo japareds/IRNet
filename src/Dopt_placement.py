@@ -10,6 +10,7 @@ import time
 import pandas as pd
 import geopy.distance
 from sklearn.model_selection import train_test_split
+from abc import ABC,abstractmethod
 import numpy as np
 import sys
 import warnings
@@ -45,6 +46,139 @@ def add_noise_signal(X:pd.DataFrame,seed:int=92,var:float=1.)->pd.DataFrame:
     X_noisy = X + noise
     #X_noisy[X_noisy<0] = 0.
     return X_noisy
+# ROIs
+class roi_generator(ABC):
+    @abstractmethod
+    def generate_rois(self,**kwargs):
+        raise NotImplementedError
+    
+class RandomRoi(roi_generator):
+    """ Regions of Interest randomly generated from rng seed"""
+    def generate_rois(self,**kwargs)->dict:
+        seed = kwargs['seed']
+        n = kwargs['n']
+        n_regions = kwargs['n_regions']
+        rng = np.random.default_rng(seed=seed)    
+        indices = np.arange(0,n,1)
+        indices_perm = rng.permutation(indices)
+        roi_idx = {el:[] for el in np.arange(n_regions)}
+        indices_split = np.array_split(indices_perm,n_regions)
+        for i in np.arange(n_regions):
+            roi_idx[i] = indices_split[i]
+        return roi_idx
+    
+class SplitRandomRoi(roi_generator):
+    """
+    Regions of Interest randomly generated. 
+    The indices are randomly generated and then some of them are splitted into new sub regions.
+    """
+    def generate_rois(self,**kwargs):
+        seed = kwargs['seed']
+        n = kwargs['n']
+        n_regions_original = kwargs['n_regions_original']
+        rois_split = kwargs['rois_split']
+        n_regions_subsplit = kwargs['n_regions_subsplit']
+        seed_subsplit = kwargs['seed_subsplit']
+        rng = np.random.default_rng(seed=seed)
+        indices = np.arange(0,n,1)
+        # first split. Original ROIs
+        indices_perm = rng.permutation(indices)
+        roi_idx = {el:[] for el in np.arange(n_regions_original)}
+        indices_split = np.array_split(indices_perm,n_regions_original)
+        for i in np.arange(n_regions_original):
+            roi_idx[i] = indices_split[i]
+        # second split. Maintain some ROIs and split others
+        new_roi_idx = {}
+        rng_subsplit = np.random.default_rng(seed=seed_subsplit)
+        for i in roi_idx:
+            if i in rois_split:
+                indices_roi = roi_idx[i]
+                indices_roi_perm = rng_subsplit.permutation(indices_roi)
+                indices_roi_split = np.array_split(indices_roi_perm,n_regions_subsplit)
+                new_dict = {}
+                for j in np.arange(n_regions_subsplit):
+                    new_dict[float(f'{i}.{j+1}')] = indices_roi_split[j]
+                new_roi_idx.update(new_dict)
+            else:
+                new_roi_idx[i] = roi_idx[i]
+            
+        return new_roi_idx
+            
+    
+class VarianceRoi(roi_generator):
+    def generate_rois(self,**kwargs)->dict:
+        coordinate_error_variance_fullymonitored = kwargs['coordinate_error_variance_fullymonitored']
+        variance_thresholds = kwargs['variance_thresholds']
+        n_regions = kwargs['n_regions']
+        print(f'Determining indices that belong to each ROI. {n_regions} regions with thresholds: {variance_thresholds}')
+        if type(variance_thresholds) is not list:
+            variance_thresholds = [variance_thresholds]
+        if len(variance_thresholds) != n_regions:
+            raise ValueError(f'Number of variance thresholds: {variance_thresholds} mismatch specified number of regions: {n_regions}')
+        roi_idx = {el:[] for el in variance_thresholds}
+        for i in range(len(variance_thresholds[:-1])):
+            print(f'Variance threshold between {variance_thresholds[i]} and {variance_thresholds[i+1]}')
+            stations = [j for j in coordinate_error_variance_fullymonitored[np.logical_and(coordinate_error_variance_fullymonitored>=variance_thresholds[i],coordinate_error_variance_fullymonitored<variance_thresholds[i+1])]]
+            print(f'{len(stations)} stations')
+            idx_stations = np.where(np.isin(coordinate_error_variance_fullymonitored,stations))[0]
+            roi_idx[variance_thresholds[i]] = idx_stations
+        stations = [j for j in coordinate_error_variance_fullymonitored[coordinate_error_variance_fullymonitored>=variance_thresholds[-1]]]
+        print(f'{len(stations)} stations with a distance larger than {variance_thresholds[-1]}')
+        idx_stations = np.where(np.isin(coordinate_error_variance_fullymonitored,stations))[0]
+        roi_idx[variance_thresholds[-1]] = idx_stations
+        return roi_idx
+    
+class DistanceRoi(roi_generator):
+    def generate_rois(self,**kwargs)->dict:
+        """
+        Generates Regions of Interest (ROIs) based on distance from certain station
+
+        Args:        
+            distances (pd.Series): distance of each location from origin station
+            distance_thresholds (list): thresholds for each ROI
+            n_regions (int): number of ROIs
+
+        Raises:
+            ValueError: Check if number of specified distance thresholds matches number of ROIs
+
+        Returns:
+            dict: Indices of each ROI. Key specifies the distance threshold
+        """
+        distances = kwargs['distances']
+        distance_thresholds = kwargs['distance_thresholds']
+        n_regions = kwargs['n_regions']
+        print(f'Determining indices that belong to each ROI. {n_regions} regions with thresholds: {distance_thresholds}')
+        if type(distance_thresholds) is not list:
+            distance_thresholds = [distance_thresholds]
+        if len(distance_thresholds) != n_regions:
+            raise ValueError(f'Number of distance thresholds: {distance_thresholds} mismatch specified number of regions: {n_regions}')
+        roi_idx = {el:[] for el in distance_thresholds}
+        #distance_thresholds = np.insert(distance_thresholds,0,0)
+        for i in range(len(distance_thresholds[:-1])):
+            print(f'Distance threshold between {distance_thresholds[i]} and {distance_thresholds[i+1]}')
+            stations = [j for j in distances[np.logical_and(distances>=distance_thresholds[i],distances<distance_thresholds[i+1])].index]
+            print(f'Stations ({len(stations)}): {stations}')
+            idx_stations = np.where(np.isin(distances.index,stations))[0]
+            roi_idx[distance_thresholds[i]] = idx_stations
+        stations = [j for j in distances[distances>=distance_thresholds[-1]].index]
+        print(f'Stations with a distance larger than {distance_thresholds[-1]} ({len(stations)}): {stations}')
+        idx_stations = np.where(np.isin(distances.index,stations))[0]
+        roi_idx[distance_thresholds[-1]] = idx_stations
+        
+        return roi_idx
+
+
+class ROI():
+    """
+    Region of interest (ROI) class. Select a generator from different roigenerator classes.
+    Use as:
+        roi = ROI(generator())
+        roi.deine_ROIs(**kwargs)
+    """
+    def __init__(self,generator):
+        self._generator = generator
+    def define_rois(self,**kwargs)->dict:
+        self.roi_idx = self._generator.generate_rois(**kwargs)
 
 def define_rois_distance(distances:pd.Series,distance_thresholds:list,n_regions:int)-> dict: 
     """
@@ -980,28 +1114,21 @@ if __name__ == '__main__':
         n = Psi.shape[0]
         
         # define ROIs
-        method = 'random_based'
-        if method == 'random_based':
-            random_seed = 0
-            n_regions_random = 3
-            roi_idx,roi_threshold,n_regions = define_ROIs(dataset,Psi,method=method,random_seed=random_seed,n_regions_random=n_regions_random)        
-        elif method == 'distance_based':
-            roi_threshold = [0,10,20]
-            roi_idx,roi_threshold,n_regions = define_ROIs(dataset,Psi,method=method,roi_threshold=roi_threshold)        
-
-        variance_threshold_ratio = [1.5,3.0,5.0]
+        roi = ROI(SplitRandomRoi())
+        roi.define_rois(seed=0,n=n,n_regions_original=2,rois_split=[0],n_regions_subsplit=2,seed_subsplit=0)
+        roi_idx = roi.roi_idx
+        roi_threshold,n_regions = [i for i in roi_idx.keys()],len(roi_idx)
+        variance_threshold_ratio = [1.25,1.75,2.0]
 
         if len(variance_threshold_ratio) != n_regions:
             raise ValueError(f'Number of user-defined thresholds ({len(variance_threshold_ratio)}) mismatch number of ROIs ({n_regions})')
 
-        # n_sensors = 40
-        # n_sensors_per_roi = [5,35]# set to -1 for using signal sparsity
-        #sensor_placement = Joshi_Boyd_ROIs(roi_idx,roi_threshold,n_sensors_per_roi,snapshots_matrix_train_centered)
         sensor_placement = Joshi_Boyd_VarianceThreshold(roi_idx,roi_threshold,
                                                         variance_threshold_ratio,snapshots_matrix_train_centered,
-                                                        reverse_roi_order=True,force_n=39)
+                                                        reverse_roi_order=True,force_n=-1)
         locations = [sensor_placement.locations[1],[i for i in np.arange(n) if i not in sensor_placement.locations[1]]]
         sensor_placement.C_matrix()
+
         # deploy sensors and compute variance
         worst_coordinate_variance = np.diag(Psi@np.linalg.inv(Psi.T@sensor_placement.C[1].T@sensor_placement.C[1]@Psi)@Psi.T).max()
         locations_monitored = sensor_placement.locations[1]
@@ -1009,10 +1136,7 @@ if __name__ == '__main__':
         n_locations_unmonitored = len(locations[1])
         print(f'Network planning results:\n- Total number of potential locations: {n}\n- basis sparsity: {signal_sparsity}\n- Deployed network max variance: {worst_coordinate_variance:.2f}\n- Number of monitored locations: {n_locations_monitored}\n- Number of unmonitored locations: {n_locations_unmonitored}\n')
         # save results
-        if method == 'random_based':
-            fname = f'{results_path}SensorsLocations_Boyd_N{n}_S{signal_sparsity}_VarThreshold{variance_threshold_ratio}_nSensors{n_locations_monitored}_randomSeed{random_seed}.pkl'
-        else:
-            fname = f'{results_path}SensorsLocations_Boyd_N{n}_S{signal_sparsity}_VarThreshold{variance_threshold_ratio}_nSensors{n_locations_monitored}.pkl'
+        fname = f'{results_path}SensorsLocations_Boyd_N{n}_S{signal_sparsity}_VarThreshold{variance_threshold_ratio}_nSensors{n_locations_monitored}.pkl'
         with open(fname,'wb') as f:
             pickle.dump(locations[0],f,protocol=pickle.HIGHEST_PROTOCOL)
         print(f'File saved in {fname}')

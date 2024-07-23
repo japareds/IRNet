@@ -10,6 +10,7 @@ import time
 import pandas as pd
 import geopy.distance
 from sklearn.model_selection import train_test_split
+from abc import ABC,abstractmethod
 import numpy as np
 import sys
 import warnings
@@ -99,7 +100,7 @@ def define_rois_variance(coordinate_error_variance_fullymonitored:list,variance_
     roi_idx[variance_thresholds[-1]] = idx_stations
     
     return roi_idx
-        
+
 def define_rois_random(seed:int,n:int,n_regions:int)->dict:
     rng = np.random.default_rng(seed=seed)
     indices = np.arange(0,n,1)
@@ -109,6 +110,140 @@ def define_rois_random(seed:int,n:int,n_regions:int)->dict:
     for i in np.arange(n_regions):
         roi_idx[i] = indices_split[i]
     return roi_idx
+
+class roi_generator(ABC):
+    @abstractmethod
+    def generate_rois(self,**kwargs):
+        raise NotImplementedError
+    
+class RandomRoi(roi_generator):
+    """ Regions of Interest randomly generated from rng seed"""
+    def generate_rois(self,**kwargs)->dict:
+        seed = kwargs['seed']
+        n = kwargs['n']
+        n_regions = kwargs['n_regions']
+        rng = np.random.default_rng(seed=seed)    
+        indices = np.arange(0,n,1)
+        indices_perm = rng.permutation(indices)
+        roi_idx = {el:[] for el in np.arange(n_regions)}
+        indices_split = np.array_split(indices_perm,n_regions)
+        for i in np.arange(n_regions):
+            roi_idx[i] = indices_split[i]
+        return roi_idx
+    
+class SplitRandomRoi(roi_generator):
+    """
+    Regions of Interest randomly generated. 
+    The indices are randomly generated and then some of them are splitted into new sub regions.
+    """
+    def generate_rois(self,**kwargs):
+        seed = kwargs['seed']
+        n = kwargs['n']
+        n_regions_original = kwargs['n_regions_original']
+        rois_split = kwargs['rois_split']
+        n_regions_subsplit = kwargs['n_regions_subsplit']
+        seed_subsplit = kwargs['seed_subsplit']
+        rng = np.random.default_rng(seed=seed)
+        indices = np.arange(0,n,1)
+        # first split. Original ROIs
+        indices_perm = rng.permutation(indices)
+        roi_idx = {el:[] for el in np.arange(n_regions_original)}
+        indices_split = np.array_split(indices_perm,n_regions_original)
+        for i in np.arange(n_regions_original):
+            roi_idx[i] = indices_split[i]
+        # second split. Maintain some ROIs and split others
+        new_roi_idx = {}
+        rng_subsplit = np.random.default_rng(seed=seed_subsplit)
+        for i in roi_idx:
+            if i in rois_split:
+                indices_roi = roi_idx[i]
+                indices_roi_perm = rng_subsplit.permutation(indices_roi)
+                indices_roi_split = np.array_split(indices_roi_perm,n_regions_subsplit)
+                new_dict = {}
+                for j in np.arange(n_regions_subsplit):
+                    new_dict[float(f'{i}.{j+1}')] = indices_roi_split[j]
+                new_roi_idx.update(new_dict)
+            else:
+                new_roi_idx[i] = roi_idx[i]
+            
+        return new_roi_idx
+            
+    
+class VarianceRoi(roi_generator):
+    def generate_rois(self,**kwargs)->dict:
+        coordinate_error_variance_fullymonitored = kwargs['coordinate_error_variance_fullymonitored']
+        variance_thresholds = kwargs['variance_thresholds']
+        n_regions = kwargs['n_regions']
+        print(f'Determining indices that belong to each ROI. {n_regions} regions with thresholds: {variance_thresholds}')
+        if type(variance_thresholds) is not list:
+            variance_thresholds = [variance_thresholds]
+        if len(variance_thresholds) != n_regions:
+            raise ValueError(f'Number of variance thresholds: {variance_thresholds} mismatch specified number of regions: {n_regions}')
+        roi_idx = {el:[] for el in variance_thresholds}
+        for i in range(len(variance_thresholds[:-1])):
+            print(f'Variance threshold between {variance_thresholds[i]} and {variance_thresholds[i+1]}')
+            stations = [j for j in coordinate_error_variance_fullymonitored[np.logical_and(coordinate_error_variance_fullymonitored>=variance_thresholds[i],coordinate_error_variance_fullymonitored<variance_thresholds[i+1])]]
+            print(f'{len(stations)} stations')
+            idx_stations = np.where(np.isin(coordinate_error_variance_fullymonitored,stations))[0]
+            roi_idx[variance_thresholds[i]] = idx_stations
+        stations = [j for j in coordinate_error_variance_fullymonitored[coordinate_error_variance_fullymonitored>=variance_thresholds[-1]]]
+        print(f'{len(stations)} stations with a distance larger than {variance_thresholds[-1]}')
+        idx_stations = np.where(np.isin(coordinate_error_variance_fullymonitored,stations))[0]
+        roi_idx[variance_thresholds[-1]] = idx_stations
+        return roi_idx
+    
+class DistanceRoi(roi_generator):
+    def generate_rois(self,**kwargs)->dict:
+        """
+        Generates Regions of Interest (ROIs) based on distance from certain station
+
+        Args:        
+            distances (pd.Series): distance of each location from origin station
+            distance_thresholds (list): thresholds for each ROI
+            n_regions (int): number of ROIs
+
+        Raises:
+            ValueError: Check if number of specified distance thresholds matches number of ROIs
+
+        Returns:
+            dict: Indices of each ROI. Key specifies the distance threshold
+        """
+        distances = kwargs['distances']
+        distance_thresholds = kwargs['distance_thresholds']
+        n_regions = kwargs['n_regions']
+        print(f'Determining indices that belong to each ROI. {n_regions} regions with thresholds: {distance_thresholds}')
+        if type(distance_thresholds) is not list:
+            distance_thresholds = [distance_thresholds]
+        if len(distance_thresholds) != n_regions:
+            raise ValueError(f'Number of distance thresholds: {distance_thresholds} mismatch specified number of regions: {n_regions}')
+        roi_idx = {el:[] for el in distance_thresholds}
+        #distance_thresholds = np.insert(distance_thresholds,0,0)
+        for i in range(len(distance_thresholds[:-1])):
+            print(f'Distance threshold between {distance_thresholds[i]} and {distance_thresholds[i+1]}')
+            stations = [j for j in distances[np.logical_and(distances>=distance_thresholds[i],distances<distance_thresholds[i+1])].index]
+            print(f'Stations ({len(stations)}): {stations}')
+            idx_stations = np.where(np.isin(distances.index,stations))[0]
+            roi_idx[distance_thresholds[i]] = idx_stations
+        stations = [j for j in distances[distances>=distance_thresholds[-1]].index]
+        print(f'Stations with a distance larger than {distance_thresholds[-1]} ({len(stations)}): {stations}')
+        idx_stations = np.where(np.isin(distances.index,stations))[0]
+        roi_idx[distance_thresholds[-1]] = idx_stations
+        
+        return roi_idx
+
+
+class ROI():
+    """
+    Region of interest (ROI) class. Select a generator from different roigenerator classes.
+    Use as:
+        roi = ROI(generator())
+        roi.deine_ROIs(**kwargs)
+    """
+    def __init__(self,generator):
+        self._generator = generator
+    def define_rois(self,**kwargs)->dict:
+        self.roi_idx = self._generator.generate_rois(**kwargs)
+
 
 def define_ROIs(dataset,Psi:np.ndarray,method:str,roi_threshold:list=[],random_seed:int=0,n_regions_random:int=2):
     if method not in ['distance_based','variance_based','random_based']:
@@ -819,7 +954,7 @@ class Figures():
             fig.savefig(fname,dpi=300,format='png')
             print(f'Figure saved at {fname}')
     
-    def curve_errorvariance_comparison(self,errorvar_fullymonitored:list,errorvar_reconstruction:list,variance_threshold_ratio:float,worst_coordinate_variance_fullymonitored:float,n:int,n_sensors:int,errorvar_reconstruction_Dopt:list=[],roi_idx:dict={},n_sensors_Dopt:int=0,save_fig:bool=False) -> plt.figure:
+    def curve_errorvariance_comparison(self,errorvar_fullymonitored:list,errorvar_reconstruction:list,variance_threshold_ratio:float,worst_coordinate_variance_fullymonitored:float,n:int,n_sensors:int,errorvar_reconstruction_Dopt:list=[],roi_idx:dict={},n_sensors_Dopt:int=0,method:str='random_based',random_seed:int=0,save_fig:bool=False) -> plt.figure:
         """
         Show error variance over a testing set at each network location. 
         The error variance is obtained after reconstructing the signal from p measurements.
@@ -908,7 +1043,10 @@ class Figures():
             fig.tight_layout()
             if save_fig:
                 #fname = f'{self.save_path}Curve_errorVariance_Threshold{variance_threshold_ratio}_Nsensors{n_sensors}_NsensorsDopt{n_sensors_Dopt}_NsensorsROIDopt_{n_sensors_roi}.png'
-                fname = f'{self.save_path}Curve_errorVariance_VarThreshold{variance_threshold_ratio}_Nsensors{n_sensors}_NsensorsDopt{n_sensors_Dopt}.png'
+                if method == 'random_based':
+                    fname = f'{self.save_path}Curve_errorVariance_VarThreshold{variance_threshold_ratio}_Nsensors{n_sensors}_NsensorsDopt{n_sensors_Dopt}_randomSeed{random_seed}.png'
+                else:
+                    fname = f'{self.save_path}Curve_errorVariance_VarThreshold{variance_threshold_ratio}_Nsensors{n_sensors}_NsensorsDopt{n_sensors_Dopt}.png'
                 fig.savefig(fname,dpi=300,format='png')
                 print(f'Figure saved at {fname}')
 
@@ -1097,7 +1235,7 @@ if __name__ == '__main__':
         sys.exit()
 
     # network design algorithm with heterogeneous design threshold
-    deploy_sensors_heterogeneous = False
+    deploy_sensors_heterogeneous = True
     if deploy_sensors_heterogeneous:
         print(f'\n\nAlgorithm for heterogeneous constraints. Different design threshold will be applied to different Regions of Interest (ROIs)')
         # low-rank decomposition
@@ -1115,19 +1253,15 @@ if __name__ == '__main__':
         n = Psi.shape[0]
         print(f'Low-rank decomposition. Basis shape: {Psi.shape}')
         # define ROIs with different threshold desings
-        method = 'random_based'
-        if method == 'random_based':
-            random_seed = 0
-            n_regions_random = 3
-            roi_idx,roi_threshold,n_regions = define_ROIs(dataset,Psi,method=method,random_seed=random_seed,n_regions_random=n_regions_random)        
-        elif method == 'distance_based':
-            roi_threshold = [0,10,20]
-            roi_idx,roi_threshold,n_regions = define_ROIs(dataset,Psi,method=method,roi_threshold=roi_threshold)        
+        roi = ROI(SplitRandomRoi())
+        roi.define_rois(seed=0,n=n,n_regions_original=2,rois_split=[0],n_regions_subsplit=2,seed_subsplit=2)
+        roi_idx = roi.roi_idx
+        roi_threshold,n_regions = [i for i in roi_idx.keys()],len(roi_idx)
         # initialize algorithm
         Psi_new = np.concatenate([Psi[i,:] for i in roi_idx.values()])
         fully_monitored_network_max_variance = np.diag(Psi@np.linalg.inv(Psi.T@Psi)@Psi.T).max()
         fully_monitored_network_max_variance_ROI = [np.max(np.diag(Psi@np.linalg.inv(Psi.T@Psi)@Psi.T)[i]) for i in roi_idx.values()]
-        variance_threshold_ratio = [1.5,3.0,5.0]
+        variance_threshold_ratio = [1.25,1.75,2.0]
         if len(variance_threshold_ratio) != n_regions:
             raise ValueError(f'Number of user-defined thresholds ({len(variance_threshold_ratio)}) mismatch number of ROIs ({n_regions})')
         
@@ -1143,7 +1277,7 @@ if __name__ == '__main__':
         epsilon=1e-1 tends to fail at multiple thresholds as threshold <1.1
         """
         
-        epsilon = 1e-1
+        epsilon = 7e-2
         n_it = 20
         h_prev = np.zeros(n)
         weights = 1/(h_prev+epsilon)
@@ -1173,51 +1307,12 @@ if __name__ == '__main__':
                 warnings.warn(f'Region of interest {i} failed to fulfill design threshold')
 
         # save results
-        if method == 'random_based':
-            fname = f'{results_path}SensorsLocations_N{n}_S{signal_sparsity}_VarThreshold{variance_threshold_ratio}_nSensors{n_locations_monitored}_randomSeed{random_seed}.pkl'
-        else:
-            fname = f'{results_path}SensorsLocations_N{n}_S{signal_sparsity}_VarThreshold{variance_threshold_ratio}_nSensors{n_locations_monitored}.pkl'
+        fname = f'{results_path}SensorsLocations_N{n}_S{signal_sparsity}_VarThreshold{variance_threshold_ratio}_nSensors{n_locations_monitored}.pkl'
         with open(fname,'wb') as f:
             pickle.dump(locations[0],f,protocol=pickle.HIGHEST_PROTOCOL)
         print(f'File saved in {fname}')
         
         sys.exit()
-
-    """ Compare NetworkDesign results for different parameters (epsilon)"""
-    validate_epsilon = False
-    if validate_epsilon:
-        # low-rank decomposition
-        snapshots_matrix_train = X_train.to_numpy().T
-        snapshots_matrix_val = X_val.to_numpy().T
-        snapshots_matrix_test = X_test.to_numpy().T
-        snapshots_matrix_train_centered = snapshots_matrix_train - snapshots_matrix_train.mean(axis=1)[:,None]
-        snapshots_matrix_val_centered = snapshots_matrix_val - snapshots_matrix_train.mean(axis=1)[:,None]
-        snapshots_matrix_test_centered = snapshots_matrix_test - snapshots_matrix_train.mean(axis=1)[:,None]
-        U,sing_vals,Vt = np.linalg.svd(snapshots_matrix_train_centered,full_matrices=False)
-        print(f'Training snapshots matrix has dimensions {snapshots_matrix_train_centered.shape}.\nLeft singular vectors matrix has dimensions {U.shape}\nRight singular vectors matrix has dimensions [{Vt.shape}]\nNumber of singular values: {sing_vals.shape}')
-        # specify signal sparsity and network parameters
-        signal_sparsity = 28
-        Psi = U[:,:signal_sparsity]
-        n = Psi.shape[0]
-        In = np.identity(n)
-        # load moniteored locations IRL1ND results
-        epsilon_range = np.logspace(-3,-1,3)
-        variance_ratio_range = [1.01,1.05,1.1,1.2,1.3,1.4,1.5]
-        worst_coordinate_variance_epsilon = pd.DataFrame([],columns=variance_ratio_range,index=epsilon_range)
-        for var_ratio in variance_ratio_range:
-            for epsilon in epsilon_range:
-                fname = f'{results_path}NetworkDesign/epsilon{epsilon:.0e}/SensorsLocations_N{n}_S{signal_sparsity}_VarThreshold{var_ratio:.2f}.pkl'
-                try:
-                    with open(fname,'rb') as f:
-                        locations_monitored = np.sort(pickle.load(f))
-                    locations_unmonitored = [i for i in np.arange(n) if i not in locations_monitored]
-                    C = In[locations_monitored,:]
-                    worst_coordinate_variance_epsilon.loc[epsilon,var_ratio] = np.diag(Psi@np.linalg.inv(Psi.T@C.T@C@Psi)@Psi.T).max()
-                except:
-                    print(f'No file for error variance ratio {var_ratio:.2f} and epsilon {epsilon:.1e}')
-        print(f'Analytical worst coordinate error variance for different IRL1ND parameter\n{worst_coordinate_variance_epsilon}')
-        sys.exit()
-
 
     """ Reconstruct signal using measurements at certain locations and compare with actual values """
     reconstruct_signal = True
@@ -1230,14 +1325,13 @@ if __name__ == '__main__':
             variance_threshold_ratio = 1.3
             n_sensors = 41
         else:
-            method = 'random_based'
             # random ROIs parameters
-            random_seed = 0
+            random_seed = 1
             n_regions_random = 3
             # Network design and D-opt parameters for loading results
-            variance_threshold_ratio = [1.5,3.0,5.0]
-            n_sensors = 39
-            n_sensors_Dopt = 39
+            variance_threshold_ratio = [1.25,1.75,2.0]
+            n_sensors = 38
+            n_sensors_Dopt = 42
             
 
         # low-rank decomposition
@@ -1266,8 +1360,11 @@ if __name__ == '__main__':
             worst_variance_fullymonitored = np.diag(error_variance_fullymonitored).max()
             rmse_fullymonitored = np.sqrt(np.trace(error_variance_fullymonitored)/n)
         else:
-            if method == 'random_based':
-                roi_idx,roi_threshold,n_regions = define_ROIs(dataset,Psi,method=method,random_seed=random_seed,n_regions_random=n_regions_random)
+            # split locatios into Regions of Interest (ROIs)
+            roi = ROI(SplitRandomRoi())
+            roi.define_rois(seed=0,n=n,n_regions_original=2,rois_split=[0],n_regions_subsplit=2,seed_subsplit=1)
+            roi_idx = roi.roi_idx
+            roi_threshold,n_regions = [i for i in roi_idx.keys()],len(roi_idx)
 
             error_variance_fullymonitored_roi = [(Psi@np.linalg.inv(Psi.T@Psi)@Psi.T)[i] for i in roi_idx.values()]
             worst_variance_fullymonitored_roi = [np.max(np.diag(Psi@np.linalg.inv(Psi.T@Psi)@Psi.T)[i]) for i in roi_idx.values()]
@@ -1278,10 +1375,7 @@ if __name__ == '__main__':
         if homogeneous_threshold:
             fname = f'{results_path}NetworkDesign/homogeneous/SensorsLocations_N{n}_S{signal_sparsity}_VarThreshold{variance_threshold_ratio:.2f}_nSensors{n_sensors}.pkl'
         else:
-            if method == 'random_based':
-                fname = f'{results_path}NetworkDesign/heterogeneous/{method}/SensorsLocations_N{n}_S{signal_sparsity}_VarThreshold{variance_threshold_ratio}_nSensors{n_sensors}_randomSeed{random_seed}.pkl'
-            else:
-                fname = f'{results_path}NetworkDesign/heterogeneous/{method}/SensorsLocations_N{n}_S{signal_sparsity}_VarThreshold{variance_threshold_ratio}_nSensors{n_sensors}.pkl'
+            fname = f'{results_path}NetworkDesign/heterogeneous/random_based/SensorsLocations_N{n}_S{signal_sparsity}_VarThreshold{variance_threshold_ratio}_nSensors{n_sensors}.pkl'
         with open(fname,'rb') as f:
             locations_monitored = np.sort(pickle.load(f))
         locations_unmonitored = [i for i in np.arange(n) if i not in locations_monitored]
@@ -1315,10 +1409,7 @@ if __name__ == '__main__':
                 if homogeneous_threshold:
                     fname = f'{results_path}Dopt/homogeneous/SensorsLocations_N{n}_S{signal_sparsity}_nSensors{n_locations_monitored}.pkl'
                 else:
-                    if method == 'random_based':
-                        fname = f'{results_path}Dopt/heterogeneous/{method}/SensorsLocations_Boyd_N{n}_S{signal_sparsity}_VarThreshold{variance_threshold_ratio}_nSensors{n_sensors_Dopt}_randomSeed{random_seed}.pkl'
-                    else:
-                        fname = f'{results_path}Dopt/heterogeneous/{method}/SensorsLocations_Boyd_N{n}_S{signal_sparsity}_VarThreshold{variance_threshold_ratio}_nSensors{n_sensors_Dopt}.pkl'
+                    fname = f'{results_path}Dopt/heterogeneous/random_based/SensorsLocations_Boyd_N{n}_S{signal_sparsity}_VarThreshold{variance_threshold_ratio}_nSensors{n_sensors_Dopt}.pkl'
                 print(f'Loading D-opt solution from {fname}')
                 with open(fname,'rb') as f:
                     locations_monitored_Dopt = np.sort(pickle.load(f))
@@ -1330,7 +1421,7 @@ if __name__ == '__main__':
                 rmse_Dopt_reconstruction,errorvar_Dopt_reconstruction = signal_reconstruction_regression(Psi,locations_monitored_Dopt,X_test=X_test_proj,X_test_measurements=X_test_proj_noisy,projected_signal=True)
 
             except:
-                    print(f'No Dopt sensor placement file for worse error variance threshold {variance_threshold_ratio} and num sensors {n_locations_monitored}')
+                    print(f'No Dopt sensor placement file in for worse error variance threshold {variance_threshold_ratio} and num sensors {n_locations_monitored}')
                     errorvar_reconstruction_Dopt = []
 
         else:
@@ -1387,7 +1478,8 @@ if __name__ == '__main__':
             plots.curve_errorvariance_comparison(np.diag(error_variance_fullymonitored),np.diag(error_variance_design),
                                                  variance_threshold_ratio,worst_variance_fullymonitored_roi,
                                                  n,n_locations_monitored,
-                                                 np.diag(error_variance_Dopt),roi_idx,n_sensors_Dopt,save_fig=False)
+                                                 np.diag(error_variance_Dopt),roi_idx,n_sensors_Dopt,
+                                                 method='',random_seed=random_seed,save_fig=False)
                     
         plt.show()
         sys.exit()
