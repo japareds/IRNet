@@ -79,35 +79,41 @@ Dopt	[1.5,2.0,2.5]		43		no		yes
 
 ------------------------------------------------------------------------------------------------------
 3) Random ROIs
-3.1) 2ROIs: seed 0. 24 and 24 locations per ROI
+3.1) 2ROIs: 24 and 24 locations per ROI
 
-method	design threshold	n_sensors	optimal		figure
-IRNet	[1.5,2.0]		38		yes		yes
-Dopt	[1.5,2.0]		41		yes		yes
-Dopt	[1.5,2.0]		38		no		yes
+method	seed	design threshold	n_sensors	optimal		figure
+IRNet	0	[1.5,2.0]		38		yes		yes
+Dopt	0	[1.5,2.0]		41		yes		yes
+Dopt	0	[1.5,2.0]		38		no		yes
 
-IRNet	[2.0,3.0]		37		yes		yes
-Dopt	[2.0,3.0]		40		yes		yes
-Dopt	[2.0,3.0]		37		no		yes
+IRNet	0	[2.0,3.0]		37		yes		yes
+Dopt	0	[2.0,3.0]		40		yes		yes
+Dopt	0	[2.0,3.0]		37		no		yes
 
-IRNet	[3.0,5.0]		38		yes
-Dopt	[3.0,5.0]		40		yes
+IRNet	0	[3.0,5.0]		38		yes
+Dopt	0	[3.0,5.0]		40		yes
 
-IRNet	[2.0,5.0]		38		yes		
-Dopt	[2.0,5.0]		40		yes
+IRNet	0	[2.0,5.0]		38		yes		
+Dopt	0	[2.0,5.0]		40		yes
 
-IRNet	[2.0,4.0]		38		yes
-Dopt	[2.0,4.0]		40		yes
+IRNet	0	[2.0,4.0]		38		yes
+Dopt	0	[2.0,4.0]		40		yes
 
 
-3.2) 3ROIs. seed 0. 16,16,16 elements per ROI
-method	design threshold	n_sensors	optimal		figure
-IRNet	[1.5,3.0,5.0]		39		yes		yes
-Dopt 	[1.5,3.0,5.0]		40		yes		yes
-Dopt	[1.5,3.0,5.0]		39		no		yes
+3.2) 3ROIs.  16,16,16 elements per ROI
+method	seed	design threshold	n_sensors	optimal		figure
+IRNet	0	[1.5,3.0,5.0]		39		yes		yes
+Dopt 	0	[1.5,3.0,5.0]		40		yes		yes
+Dopt	0	[1.5,3.0,5.0]		39		no		yes
 
-IRNet	[2.0,3.0,5.0]		38		yes
-Dopt	[2.0,3.0,5.0]		39		yes
+IRNet	0	[2.0,3.0,5.0]		38		yes
+Dopt	0	[2.0,3.0,5.0]		39		yes
+
+3.3) 3 ROIs. Subsplit a random ROI
+method	seed	seed_subsplit	ROIs_subsplit	design threshold	n_sensors	optimal		figure
+IRNet	0	0		0		[1.1,1.5,2.0]		38		yes		yes
+Dopt	0	0		0		[1.1,1.5,2.0]		43		yes		yes
+Dopt	0	0		0		[1.1,1.5,2.0]		38		no		yes
 ------------------------------------------------------------------------------------------------------
 
 

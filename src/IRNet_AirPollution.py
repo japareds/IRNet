@@ -46,71 +46,7 @@ def add_noise_signal(X:pd.DataFrame,seed:int=92,var:float=1.)->pd.DataFrame:
     #X_noisy[X_noisy<0] = 0.
     return X_noisy
 
-def define_rois_distance(distances:pd.Series,distance_thresholds:list,n_regions:int)-> dict: 
-    """
-    Generates Regions of Interest (ROIs) based on distance from certain station
-
-    Args:        
-        distances (pd.Series): distance of each location from origin station
-        distance_thresholds (list): thresholds for each ROI
-        n_regions (int): number of ROIs
-
-    Raises:
-        ValueError: Check if number of specified distance thresholds matches number of ROIs
-
-    Returns:
-        dict: Indices of each ROI. Key specifies the distance threshold
-    """
-    print(f'Determining indices that belong to each ROI. {n_regions} regions with thresholds: {distance_thresholds}')
-    if type(distance_thresholds) is not list:
-        distance_thresholds = [distance_thresholds]
-    if len(distance_thresholds) != n_regions:
-        raise ValueError(f'Number of distance thresholds: {distance_thresholds} mismatch specified number of regions: {n_regions}')
-    roi_idx = {el:[] for el in distance_thresholds}
-    #distance_thresholds = np.insert(distance_thresholds,0,0)
-    for i in range(len(distance_thresholds[:-1])):
-        print(f'Distance threshold between {distance_thresholds[i]} and {distance_thresholds[i+1]}')
-        stations = [j for j in distances[np.logical_and(distances>=distance_thresholds[i],distances<distance_thresholds[i+1])].index]
-        print(f'Stations ({len(stations)}): {stations}')
-        idx_stations = np.where(np.isin(distances.index,stations))[0]
-        roi_idx[distance_thresholds[i]] = idx_stations
-    stations = [j for j in distances[distances>=distance_thresholds[-1]].index]
-    print(f'Stations with a distance larger than {distance_thresholds[-1]} ({len(stations)}): {stations}')
-    idx_stations = np.where(np.isin(distances.index,stations))[0]
-    roi_idx[distance_thresholds[-1]] = idx_stations
-
-    return roi_idx
-
-def define_rois_variance(coordinate_error_variance_fullymonitored:list,variance_thresholds:list,n_regions:int)->dict:
-    print(f'Determining indices that belong to each ROI. {n_regions} regions with thresholds: {variance_thresholds}')
-    if type(variance_thresholds) is not list:
-        variance_thresholds = [variance_thresholds]
-    if len(variance_thresholds) != n_regions:
-        raise ValueError(f'Number of variance thresholds: {variance_thresholds} mismatch specified number of regions: {n_regions}')
-    roi_idx = {el:[] for el in variance_thresholds}
-    for i in range(len(variance_thresholds[:-1])):
-        print(f'Variance threshold between {variance_thresholds[i]} and {variance_thresholds[i+1]}')
-        stations = [j for j in coordinate_error_variance_fullymonitored[np.logical_and(coordinate_error_variance_fullymonitored>=variance_thresholds[i],coordinate_error_variance_fullymonitored<variance_thresholds[i+1])]]
-        print(f'{len(stations)} stations')
-        idx_stations = np.where(np.isin(coordinate_error_variance_fullymonitored,stations))[0]
-        roi_idx[variance_thresholds[i]] = idx_stations
-    stations = [j for j in coordinate_error_variance_fullymonitored[coordinate_error_variance_fullymonitored>=variance_thresholds[-1]]]
-    print(f'{len(stations)} stations with a distance larger than {variance_thresholds[-1]}')
-    idx_stations = np.where(np.isin(coordinate_error_variance_fullymonitored,stations))[0]
-    roi_idx[variance_thresholds[-1]] = idx_stations
-    
-    return roi_idx
-
-def define_rois_random(seed:int,n:int,n_regions:int)->dict:
-    rng = np.random.default_rng(seed=seed)
-    indices = np.arange(0,n,1)
-    indices_perm = rng.permutation(indices)
-    roi_idx = {el:[] for el in np.arange(n_regions)}
-    indices_split = np.array_split(indices_perm,n_regions)
-    for i in np.arange(n_regions):
-        roi_idx[i] = indices_split[i]
-    return roi_idx
-
+# ROI classes
 class roi_generator(ABC):
     @abstractmethod
     def generate_rois(self,**kwargs):
@@ -131,7 +67,7 @@ class RandomRoi(roi_generator):
             roi_idx[i] = indices_split[i]
         return roi_idx
     
-class SplitRandomRoi(roi_generator):
+class SubSplitRandomRoi(roi_generator):
     """
     Regions of Interest randomly generated. 
     The indices are randomly generated and then some of them are splitted into new sub regions.
@@ -244,35 +180,116 @@ class ROI():
     def define_rois(self,**kwargs)->dict:
         self.roi_idx = self._generator.generate_rois(**kwargs)
 
+# file writer classes
+class FileWriter(ABC):
+    @abstractmethod
+    def save(self,**kwargs):
+        raise NotImplementedError
 
-def define_ROIs(dataset,Psi:np.ndarray,method:str,roi_threshold:list=[],random_seed:int=0,n_regions_random:int=2):
-    if method not in ['distance_based','variance_based','random_based']:
-        raise ValueError(f'Specified method {method} for splitting into ROIs not implemented yet.')
+class WriteRandomFile(FileWriter):
+    def save(self,results_path,locations,**kwargs):
+        n = kwargs['n']
+        signal_sparsity = kwargs['signal_sparsity']
+        variance_threshold_ratio = kwargs['variance_threshold_ratio']
+        n_locations_monitored = kwargs['n_locations_monitored']
+        random_seed = kwargs['random_seed']
+        
+        fname = f'{results_path}SensorsLocations_N{n}_S{signal_sparsity}_VarThreshold{variance_threshold_ratio}_nSensors{n_locations_monitored}_randomSeed{random_seed}.pkl'
+        with open(fname,'wb') as f:
+            pickle.dump(locations,f,protocol=pickle.HIGHEST_PROTOCOL)
+        print(f'File saved in {fname}')
 
-    elif method == 'distance_based':
-        print('Distance based ROIs')
-        n_regions = len(roi_threshold)
-        roi_idx = define_rois_distance(dataset.distances,roi_threshold,n_regions)
+class WriteSplitRandomFile(FileWriter):
+    def save(self,results_path,locations,**kwargs):
+        n = kwargs['n']
+        signal_sparsity = kwargs['signal_sparsity']
+        variance_threshold_ratio = kwargs['variance_threshold_ratio']
+        n_locations_monitored = kwargs['n_locations_monitored']
+        random_seed = kwargs['seed']
+        seed_subsplit = kwargs['seed_subsplit']
+        rois_split = kwargs['rois_split']
+        
+        fname = f'{results_path}SensorsLocations_N{n}_S{signal_sparsity}_VarThreshold{variance_threshold_ratio}_nSensors{n_locations_monitored}_randomSeed{random_seed}_split{rois_split}_subsplitSeed{seed_subsplit}.pkl'
+        with open(fname,'wb') as f:
+            pickle.dump(locations,f,protocol=pickle.HIGHEST_PROTOCOL)
+        print(f'File saved in {fname}')
+
+class SaveLocations():
+    def __init__(self,writer):
+        self._writer = writer
+    def save_locations(self,results_path,locations,**kwargs):
+        self._writer.save(results_path,locations,**kwargs)
+
+# file reader class
+class FileReader(ABC):
+    @abstractmethod
+    def load(self,**kwargs):
+        raise NotImplementedError
+
+class ReadRandomFile(FileReader):
+    def load(self,file_path,**kwargs):
+        n = kwargs['n']
+        signal_sparsity = kwargs['signal_sparsity']
+        variance_threshold_ratio = kwargs['signal_threshold_ratio']
+        n_sensors = kwargs['n_sensors']
+        random_seed = kwargs['random_seed']
+        fname = f'{file_path}SensorsLocations_N{n}_S{signal_sparsity}_VarThreshold{variance_threshold_ratio}_nSensors{n_sensors}_randomSeed{random_seed}.pkl'
+        with open(fname,'rb') as f:
+            locations_monitored = np.sort(pickle.load(f))
+        return locations_monitored
+class ReadSplitRandomFile(FileReader):
+    def load(self,file_path,**kwargs):
+        n = kwargs['n']
+        signal_sparsity = kwargs['signal_sparsity']
+        variance_threshold_ratio = kwargs['variance_threshold_ratio']
+        n_sensors = kwargs['n_sensors']
+        random_seed = kwargs['random_seed']
+        seed_subsplit = kwargs['seed_subsplit']
+        rois_split = kwargs['rois_split']
+
+        fname = f'{file_path}SensorsLocations_N{n}_S{signal_sparsity}_VarThreshold{variance_threshold_ratio}_nSensors{n_sensors}_randomSeed{random_seed}_split{rois_split}_subsplitSeed{seed_subsplit}.pkl'
+        with open(fname,'rb') as f:
+            locations_monitored = np.sort(pickle.load(f))
+        return locations_monitored
     
-    elif method == 'variance_based':
-        print('Variance based ROIs')
-        coordinate_error_variance_fullymonitored = np.diag(Psi@np.linalg.inv(Psi.T@Psi)@Psi.T)
-        n_regions = len(roi_threshold)
-        roi_idx = define_rois_variance(coordinate_error_variance_fullymonitored,roi_threshold,n_regions)
+class ReadRandomFileBoyd(FileReader):
+    def load(self,file_path,**kwargs):
+        n = kwargs['n']
+        signal_sparsity = kwargs['signal_sparsity']
+        variance_threshold_ratio = kwargs['variance_threshold_ratio']
+        random_seed = kwargs['random_seed']
+        n_sensors_Dopt = kwargs['n_sensors_Dopt']
+        fname = f'{file_path}SensorsLocations_Boyd_N{n}_S{signal_sparsity}_VarThreshold{variance_threshold_ratio}_nSensors{n_sensors_Dopt}_randomSeed{random_seed}.pkl'
+        with open(fname,'rb') as f:
+            locations_monitored = np.sort(pickle.load(f))
+        return locations_monitored
     
-    elif method == 'random_based':
-        print('Random based ROIs')
-        n = Psi.shape[0]
-        roi_idx = define_rois_random(random_seed,n,n_regions_random)
-        roi_threshold = [i for i in roi_idx.keys()]
-        n_regions = n_regions_random
-
-
-    return roi_idx, roi_threshold, n_regions
-
-
-
+class ReadSplitRandomFileBoyd(FileReader):
+    def load(self,file_path,**kwargs):
+        n = kwargs['n']
+        signal_sparsity = kwargs['signal_sparsity']
+        variance_threshold_ratio = kwargs['variance_threshold_ratio']
+        n_sensors_Dopt = kwargs['n_sensors']
+        random_seed = kwargs['random_seed']
+        seed_subsplit = kwargs['seed_subsplit']
+        rois_split = kwargs['rois_split']
+        fname = f'{file_path}SensorsLocations_Boyd_N{n}_S{signal_sparsity}_VarThreshold{variance_threshold_ratio}_nSensors{n_sensors_Dopt}_randomSeed{random_seed}_split{rois_split}_subsplitSeed{seed_subsplit}.pkl'
+        try:
+            with open(fname,'rb') as f:
+                locations_monitored = np.sort(pickle.load(f))
+            print(f'Loaded file {fname}')
+        except:
+            warnings.warn(f'No file {fname}')
+            return 
+        return locations_monitored
     
+class ReadLocations():
+    def __init__(self,reader):
+        self._reader = reader
+    def load_locations(self,file_path,**kwargs):
+        locations_monitored = self._reader.load(file_path,**kwargs)
+        return locations_monitored
+
 
 # signal reconstruction functions
 def signal_reconstruction_svd(U:np.ndarray,snapshots_matrix_train:np.ndarray,snapshots_matrix_val_centered:np.ndarray,X_val:pd.DataFrame,s_range:np.ndarray) -> pd.DataFrame:
@@ -1235,7 +1252,7 @@ if __name__ == '__main__':
         sys.exit()
 
     # network design algorithm with heterogeneous design threshold
-    deploy_sensors_heterogeneous = True
+    deploy_sensors_heterogeneous = False
     if deploy_sensors_heterogeneous:
         print(f'\n\nAlgorithm for heterogeneous constraints. Different design threshold will be applied to different Regions of Interest (ROIs)')
         # low-rank decomposition
@@ -1253,15 +1270,17 @@ if __name__ == '__main__':
         n = Psi.shape[0]
         print(f'Low-rank decomposition. Basis shape: {Psi.shape}')
         # define ROIs with different threshold desings
-        roi = ROI(SplitRandomRoi())
-        roi.define_rois(seed=0,n=n,n_regions_original=2,rois_split=[0],n_regions_subsplit=2,seed_subsplit=2)
+        random_seed = 0
+        seed_subsplit = 0
+        rois_split=[0]
+        roi = ROI(SubSplitRandomRoi())
+        roi.define_rois(seed=random_seed,n=n,n_regions_original=2,rois_split=rois_split,n_regions_subsplit=2,seed_subsplit=seed_subsplit)
         roi_idx = roi.roi_idx
         roi_threshold,n_regions = [i for i in roi_idx.keys()],len(roi_idx)
         # initialize algorithm
-        Psi_new = np.concatenate([Psi[i,:] for i in roi_idx.values()])
         fully_monitored_network_max_variance = np.diag(Psi@np.linalg.inv(Psi.T@Psi)@Psi.T).max()
         fully_monitored_network_max_variance_ROI = [np.max(np.diag(Psi@np.linalg.inv(Psi.T@Psi)@Psi.T)[i]) for i in roi_idx.values()]
-        variance_threshold_ratio = [1.25,1.75,2.0]
+        variance_threshold_ratio = [1.1,1.5,2.0]
         if len(variance_threshold_ratio) != n_regions:
             raise ValueError(f'Number of user-defined thresholds ({len(variance_threshold_ratio)}) mismatch number of ROIs ({n_regions})')
         
@@ -1302,38 +1321,28 @@ if __name__ == '__main__':
         n_locations_unmonitored = len(locations[1])
         print(f'Network design results:\n- Total number of potential locations: {n}\n- basis sparsity: {signal_sparsity}\n- Number of monitored locations: {n_locations_monitored}\n- Number of unmonitored locations: {n_locations_unmonitored}')
         print(f'- Overall fully monitored max variance: {fully_monitored_network_max_variance}\n- Fully monitored max variance per ROI: {fully_monitored_network_max_variance_ROI}\n- Max variance design threshold per ROI: {[np.unique(deployed_network_variance_threshold)]}\n- Overall deployed network max variance: {worst_coordinate_variance}\n- Deployed network max variance per ROI: {[np.max(worst_coordinate_variance_ROIs[i]) for i in roi_idx.values()]}')
+        
+        # evaluate if algorithm was successful
+        success = [ [np.max(worst_coordinate_variance_ROIs[j]) for j in roi_idx.values()][i]<variance_threshold_ratio[i]*fully_monitored_network_max_variance_ROI[i] for i in range(n_regions)]
         for i in range(n_regions):
-            if [np.max(worst_coordinate_variance_ROIs[j]) for j in roi_idx.values()][i]>variance_threshold_ratio[i]*fully_monitored_network_max_variance_ROI[i]:
+            if success[i]:
+                print(f'Success in deploying sensors for ROI {i}')
+            else:
                 warnings.warn(f'Region of interest {i} failed to fulfill design threshold')
 
         # save results
-        fname = f'{results_path}SensorsLocations_N{n}_S{signal_sparsity}_VarThreshold{variance_threshold_ratio}_nSensors{n_locations_monitored}.pkl'
-        with open(fname,'wb') as f:
-            pickle.dump(locations[0],f,protocol=pickle.HIGHEST_PROTOCOL)
-        print(f'File saved in {fname}')
         
+        if all(success):
+            saver = SaveLocations(WriteSplitRandomFile())
+            saver.save_locations(results_path,locations[0],n=n,signal_sparsity=signal_sparsity,variance_threshold_ratio=variance_threshold_ratio,
+                                n_locations_monitored=n_locations_monitored,seed=random_seed,seed_subsplit=seed_subsplit,rois_split=rois_split)
+            
         sys.exit()
 
     """ Reconstruct signal using measurements at certain locations and compare with actual values """
     reconstruct_signal = True
     if reconstruct_signal:
         print('\nReconstructing signal from sparse measurements.\nTwo algorithms are used:\n- Network design\n- Joshi-Boyd (D-optimal) sensor selection.')
-        
-        """ Set homogeneous/heterogeneous threshold applied for designing network """
-        homogeneous_threshold = False
-        if homogeneous_threshold:
-            variance_threshold_ratio = 1.3
-            n_sensors = 41
-        else:
-            # random ROIs parameters
-            random_seed = 1
-            n_regions_random = 3
-            # Network design and D-opt parameters for loading results
-            variance_threshold_ratio = [1.25,1.75,2.0]
-            n_sensors = 38
-            n_sensors_Dopt = 42
-            
-
         # low-rank decomposition
         snapshots_matrix_train = X_train.to_numpy().T
         snapshots_matrix_val = X_val.to_numpy().T
@@ -1353,35 +1362,51 @@ if __name__ == '__main__':
             raise ValueError(f'No network with potential number of locations n:{n}')
 
         Psi = U[:,:signal_sparsity]
+        print(f'Basis shape: {Psi.shape}.')
+
         
-        # fully monitored network
+        """ Set homogeneous/heterogeneous threshold applied for designing network """
+        homogeneous_threshold = False
+        if homogeneous_threshold:
+            variance_threshold_ratio = 1.3
+            n_sensors = 41
+        else:
+            # random ROIs parameters
+            random_seed = 0
+            seed_subsplit=0
+            rois_split=[0]
+            # define ROI
+            roi = ROI(SubSplitRandomRoi())
+            roi.define_rois(seed=random_seed,n=n,n_regions_original=2,rois_split=rois_split,n_regions_subsplit=2,seed_subsplit=seed_subsplit)
+            roi_idx = roi.roi_idx
+            roi_threshold,n_regions = [i for i in roi_idx.keys()],len(roi_idx)
+            variance_threshold_ratio = [1.1,1.5,2.0]
+            # number of deployed sensors by both algorithms
+            n_sensors = 38
+            n_sensors_Dopt = 38
+        
+        # coordinate error variance for fully monitored network
         error_variance_fullymonitored = Psi@np.linalg.inv(Psi.T@Psi)@Psi.T
         if homogeneous_threshold:
             worst_variance_fullymonitored = np.diag(error_variance_fullymonitored).max()
             rmse_fullymonitored = np.sqrt(np.trace(error_variance_fullymonitored)/n)
         else:
-            # split locatios into Regions of Interest (ROIs)
-            roi = ROI(SplitRandomRoi())
-            roi.define_rois(seed=0,n=n,n_regions_original=2,rois_split=[0],n_regions_subsplit=2,seed_subsplit=1)
-            roi_idx = roi.roi_idx
-            roi_threshold,n_regions = [i for i in roi_idx.keys()],len(roi_idx)
-
             error_variance_fullymonitored_roi = [(Psi@np.linalg.inv(Psi.T@Psi)@Psi.T)[i] for i in roi_idx.values()]
             worst_variance_fullymonitored_roi = [np.max(np.diag(Psi@np.linalg.inv(Psi.T@Psi)@Psi.T)[i]) for i in roi_idx.values()]
             
-
-        print(f'Basis shape: {Psi.shape}.')
         # load monitored locations indices
         if homogeneous_threshold:
             fname = f'{results_path}NetworkDesign/homogeneous/SensorsLocations_N{n}_S{signal_sparsity}_VarThreshold{variance_threshold_ratio:.2f}_nSensors{n_sensors}.pkl'
         else:
-            fname = f'{results_path}NetworkDesign/heterogeneous/random_based/SensorsLocations_N{n}_S{signal_sparsity}_VarThreshold{variance_threshold_ratio}_nSensors{n_sensors}.pkl'
-        with open(fname,'rb') as f:
-            locations_monitored = np.sort(pickle.load(f))
+            reader = ReadLocations(ReadSplitRandomFile())
+            locations_monitored = reader.load_locations(file_path = f'{results_path}NetworkDesign/heterogeneous/random_based/',n=n,signal_sparsity=signal_sparsity,
+                                                        variance_threshold_ratio = variance_threshold_ratio,n_sensors = n_sensors,
+                                                        random_seed=random_seed,seed_subsplit=seed_subsplit,rois_split=rois_split)
+
         locations_unmonitored = [i for i in np.arange(n) if i not in locations_monitored]
         n_locations_monitored = len(locations_monitored)
         n_locations_unmonitored = len(locations_unmonitored)
-        print(f'Loading indices of monitored locations from: {fname}\n- Total number of potential locations: {n}\n- Number of monitored locations: {len(locations_monitored)}\n- Number of unmonitored locations: {len(locations_unmonitored)}')
+        print(f'- Total number of potential locations: {n}\n- Number of monitored locations: {len(locations_monitored)}\n- Number of unmonitored locations: {len(locations_unmonitored)}')
         for idx in roi_idx.values():
             print(f'ROI with {len(idx)} potential locations. Network design algorithm has {np.isin(idx,locations_monitored).sum()} sensors in ROI.')
         # get worst coordinate error variance analytically (from formula)
@@ -1408,11 +1433,14 @@ if __name__ == '__main__':
                 print(f'Loading alternative sensor placement locations obtained with Dopt method.')
                 if homogeneous_threshold:
                     fname = f'{results_path}Dopt/homogeneous/SensorsLocations_N{n}_S{signal_sparsity}_nSensors{n_locations_monitored}.pkl'
+                    with open(fname,'rb') as f:
+                        locations_monitored_Dopt = np.sort(pickle.load(f))
                 else:
-                    fname = f'{results_path}Dopt/heterogeneous/random_based/SensorsLocations_Boyd_N{n}_S{signal_sparsity}_VarThreshold{variance_threshold_ratio}_nSensors{n_sensors_Dopt}.pkl'
-                print(f'Loading D-opt solution from {fname}')
-                with open(fname,'rb') as f:
-                    locations_monitored_Dopt = np.sort(pickle.load(f))
+                    reader = ReadLocations(ReadSplitRandomFileBoyd())
+                    locations_monitored_Dopt = reader.load_locations(file_path = f'{results_path}Dopt/heterogeneous/random_based/',n=n,signal_sparsity=signal_sparsity,
+                                                        variance_threshold_ratio = variance_threshold_ratio,n_sensors = n_sensors_Dopt,
+                                                        random_seed=random_seed,seed_subsplit=seed_subsplit,rois_split=rois_split)
+
                 locations_unmonitored_Dopt = [i for i in np.arange(n) if i not in locations_monitored_Dopt]
                 C_Dopt = In[locations_monitored_Dopt,:]
                 error_variance_Dopt = Psi@np.linalg.inv(Psi.T@C_Dopt.T@C_Dopt@Psi)@Psi.T
@@ -1479,7 +1507,7 @@ if __name__ == '__main__':
                                                  variance_threshold_ratio,worst_variance_fullymonitored_roi,
                                                  n,n_locations_monitored,
                                                  np.diag(error_variance_Dopt),roi_idx,n_sensors_Dopt,
-                                                 method='',random_seed=random_seed,save_fig=False)
+                                                 method='',random_seed=random_seed,save_fig=True)
                     
         plt.show()
         sys.exit()
