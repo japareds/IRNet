@@ -962,14 +962,6 @@ if __name__ == '__main__':
     abs_path = os.path.dirname(os.path.realpath(__file__))
     files_path = os.path.abspath(os.path.join(abs_path,os.pardir)) + '/files/'
     results_path = os.path.abspath(os.path.join(abs_path,os.pardir)) + '/test/'    
-    dataset = Dataset(files_path,fname=f'SST_month_N{args.n_locations}.npy',n_locations=args.n_locations)
-    dataset.load_dataset()
-    map_recovered = recover_map(dataset.df[0,:],dataset.idx_land,n_rows=720,n_cols=1440)
-    plots = Figures(save_path=results_path,marker_size=1,
-                fs_label=12,fs_ticks=7,fs_legend=6,fs_title=10,
-                show_plots=True)
-    plots.SST_map(map_recovered,vmin=0,vmax=30,show_coords=True,show_cbar=False,save_fig=False)
-    
     dataset = Dataset(files_path,LoadGRP(),Windowing())
     rootgrp = dataset._loader.load(files_path,fname='sst.mon.mean.nc')
     lat_range,lon_range = dataset.get_coordinates(rootgrp)
@@ -979,7 +971,6 @@ if __name__ == '__main__':
     df,idx_measurements,idx_land = dataset.create_dataframe(rootgrp,lat_range=lat_range,lon_range=lon_range,
                                   lon_min=lon_min,lon_max=lon_max,lat_min=lat_min,lat_max=lat_max)
     map_recovered = recover_map(df.iloc[0,:],idx_land,n_rows=int(4*np.abs(lat_min - lat_max)),n_cols=int(4*np.abs(lon_max - lon_min)))
-    plots.SST_map(map_recovered,vmin=0,vmax=30,show_coords=True,show_cbar=False,save_fig=False)
     
     train_ratio = 0.75
     validation_ratio = 0.15
